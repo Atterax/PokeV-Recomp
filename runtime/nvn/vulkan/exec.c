@@ -5275,6 +5275,18 @@ static uint32_t vc_pend[VC_TAB];  // entries the pending submission draws from (
 static int vc_npend;
 static uint32_t *vc_page_gen;  // per heap page: the generation of its last CPU write seen (vc_gen when observed)
 static uint32_t *vc_page_gpu;  // per heap page: the frame the GPU last wrote it (+1; 0: never)
+// Writes the OS loses. A write tracking query resets the pages' marks, and a store landing on a page while its mark is
+// reset (the game's thread rewriting its per-frame data with memcpy as the render thread asks) can go unrecorded: the
+// vertex cache kept its copy of the page from before, a frame's dynamic vertices stayed as they were, and Scarlet /
+// Violet's sandstorm, fog and the ground near them drew as huge stretched triangles - at random, as the race. A check
+// of every clean page's bytes against its copy (a scripted walk in a city) found such pages within seconds, nearly
+// all written 1-3 frames before. So a page seen written counts as written for the next VC_RECENT frames too: copied
+// again by the vertex cache, rechecked by the texture uploads and the storage watch.
+static uint32_t *vc_page_wfr;  // per heap page: the frame its last write was seen (+1; 0: never)
+#define VC_RECENT 8u
+extern uint64_t vk_frame_counter(void);
+static inline void vc_seen(uint64_t p, uint32_t g) { vc_page_gen[p] = g; vc_page_wfr[p] = (uint32_t)vk_frame_counter() + 1; }
+static inline bool vc_recent(uint64_t p) { return vc_page_wfr[p] && (uint32_t)vk_frame_counter() + 1 - vc_page_wfr[p] < VC_RECENT; }
 // A page the GPU hasn't written for this many frames is cached again (copied whole first): the game reuses its
 // memory, and pages a compute dispatch or transform feedback wrote once stayed read in place for the rest of the
 // session - the vertices read across PCIe grew to ~10 GB per 2 s after half an hour (GPU time +25%, 60 fps lost)
@@ -5320,6 +5332,7 @@ static bool pt_init(void) {
     if (!pt_state) { LOG("[vk] no page write tracking (%d, page %llu)\n", n, (unsigned long long)pg); return false; }
     vc_page_gen = calloc(HEAP_MAX / VC_PAGE, sizeof *vc_page_gen);
     vc_page_gpu = calloc(HEAP_MAX / VC_PAGE, sizeof *vc_page_gpu);
+    vc_page_wfr = calloc(HEAP_MAX / VC_PAGE, sizeof *vc_page_wfr);
     vc_page_gen[0] = ++vc_gen;  // (the probe took page 0's tracking)
     return true;
 }
@@ -5375,13 +5388,13 @@ static int pages_written(uint64_t addr, uint64_t size, uint32_t since, uint32_t 
     int n = plat_written_pages(gwin_base + lo, hi - lo, pages, 4096, &pg);
     if (n < 0) return -1;
     uint32_t g = ++vc_gen;
-    if (n >= 4096) for (uint64_t p = lo / VC_PAGE; p < hi / VC_PAGE; p++) vc_page_gen[p] = g;
-    else for (int k = 0; k < n; k++) vc_page_gen[(pages[k] - gwin_base) / VC_PAGE] = g;
+    if (n >= 4096) for (uint64_t p = lo / VC_PAGE; p < hi / VC_PAGE; p++) vc_seen(p, g);
+    else for (int k = 0; k < n; k++) vc_seen((pages[k] - gwin_base) / VC_PAGE, g);
     *now = g;
     int changed = 0;
     for (uint64_t p = lo / VC_PAGE; p < hi / VC_PAGE; p++) {
         if (gpu_unknown && vc_page_gpu[p]) return -2;
-        if (vc_page_gen[p] > since) changed = 1;
+        if (vc_page_gen[p] > since || vc_recent(p)) changed = 1;
     }
     return changed;
 }
@@ -5497,8 +5510,8 @@ void vc_flush(void) {
         uint64_t pg = VC_PAGE;
         int n = plat_written_pages(gwin_base + lo, hi - lo, pages, 4096, &pg);
         prof_vc_queries++;
-        if (n < 0 || n >= 4096) for (uint64_t p = lo / VC_PAGE; p < hi / VC_PAGE; p++) vc_page_gen[p] = g;  // (all)
-        else for (int k = 0; k < n; k++) vc_page_gen[(pages[k] - gwin_base) / VC_PAGE] = g;
+        if (n < 0 || n >= 4096) for (uint64_t p = lo / VC_PAGE; p < hi / VC_PAGE; p++) vc_seen(p, g);  // (all)
+        else for (int k = 0; k < n; k++) vc_seen((pages[k] - gwin_base) / VC_PAGE, g);
         if (n > 0) prof_vc_scan_pages += (uint64_t)n;
         i = j;
     }
@@ -5510,7 +5523,7 @@ void vc_flush(void) {
         VkBufferCopy cp[64];
         int nc = 0;
         for (uint64_t p = e->lo / VC_PAGE; p < e->hi / VC_PAGE; p++) {
-            if (e->gen && vc_page_gen[p] <= e->gen) continue;
+            if (e->gen && vc_page_gen[p] <= e->gen && !vc_recent(p)) continue;  // (unwritten, and not lately)
             uint64_t o = p * VC_PAGE;
             if (nc && cp[nc - 1].srcOffset + cp[nc - 1].size == o) { cp[nc - 1].size += VC_PAGE; continue; }
             if (nc == 64) { nc = 1; cp[0] = (VkBufferCopy){e->lo, 0, e->hi - e->lo}; break; }  // (scattered: the whole range)
