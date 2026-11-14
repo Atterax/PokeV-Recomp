@@ -70,6 +70,14 @@ static int slot_cat(int slot) {
 // the list with plain ImGui widgets, and the list takes the page's whole height: nobody could reach them - #44.)
 static void stick_mouse_rows() {
     bool changed = false;
+    opt_section(TR("Sticks", "Analógicos"));
+    changed |= opt_slider(TR("Dead zone", "Zona morta"), &g_settings.stick_deadzone, 0.0f, 40.0f, 1.0f, 15.0f, "%.0f%%",
+                          TR("A stick nearer the centre than this counts as released. Raise it if something moves on "
+                             "its own with the controller untouched (the map's magnifier, the camera); lower it if small "
+                             "movements feel ignored.",
+                             "Um analógico mais perto do centro do que isto conta como solto. Aumente se algo se mexe "
+                             "sozinho com o controle parado (a lupa do mapa, a câmera); diminua se movimentos pequenos "
+                             "parecem ignorados."));
     opt_section(TR("Right stick", "Analógico direito"));
     {
         static const int deg[] = {0, 10, 15, 20, 25};
