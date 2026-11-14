@@ -5083,9 +5083,35 @@ static bool xm_all_written(uint64_t a, uint64_t n) {
     return true;
 }
 
+// Does the program write transform feedback buffer b? (its control section's output count for b, as draw_ reads it
+// into vkey.xfb_count). A binding stays set from earlier sessions when a later program writes fewer buffers -
+// Pokémon Scarlet / Violet leaves buffer 3 bound for its skinning programs, which write 0..2, at an address 100 MB
+// from the arena. Counted, that binding sent each of those sessions to the heap (it lies outside the mirror's window)
+// while the other sessions over the same arena went to the mirror, and NPCs' faces seen up close were drawn from stale
+// skinning: they covered their own eyebrows and eyelashes (after walking up to them twice; LARECOMP_VK_XFB_MIRROR=0
+// hid it).
+static bool xm_buffer_used(int b) {
+    const uint8_t *ctl = st.program ? st.program->stages[0].control : NULL;
+    return !ctl || *(const uint32_t *)(ctl + 0x4DC + 0x80 * b) != 0;
+}
+
 // before a transform feedback draw: can its buffers all go to the mirror? (then they're marked written, and queued
 // for the copy back)
+static bool xm_prepare_(void);
 static bool xm_prepare(void) {
+    if (xm_prepare_()) return true;
+    // To the heap: the parts of the mirror its buffers cover no longer hold this frame's output (a later read of them
+    // takes the heap, where this session writes)
+    if (!xm_lo) return false;
+    for (int b = 0; b < 4; b++) {
+        if (!xfb_addr[b] || !xfb_size[b] || !xm_buffer_used(b)) continue;
+        uint64_t lo = xfb_addr[b] > xm_lo ? xfb_addr[b] : xm_lo, hi = xfb_addr[b] + xfb_size[b];
+        if (hi > xm_lo + XM_SIZE) hi = xm_lo + XM_SIZE;
+        for (uint64_t c = (lo - xm_lo) / XM_CHUNK; hi > lo && c <= (hi - 1 - xm_lo) / XM_CHUNK; c++) xm_written[c] = 0;
+    }
+    return false;
+}
+static bool xm_prepare_(void) {
     if (!xm_on() || !gmem_buf) return false;
     if (!xm_buf) {
         VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = XM_SIZE,
@@ -5095,7 +5121,7 @@ static bool xm_prepare(void) {
         if (vmaCreateBuffer(g_vk.vma, &bi, &ai, &xm_buf, &xm_mem, NULL) != VK_SUCCESS) { xm_buf = VK_NULL_HANDLE; return false; }
     }
     for (int b = 0; b < 4; b++) {
-        if (!xfb_addr[b] || !xfb_size[b]) continue;
+        if (!xfb_addr[b] || !xfb_size[b] || !xm_buffer_used(b)) continue;  // (a buffer the program doesn't write: left alone)
         if (!xm_lo) {  // placed around the first session's buffers (the arena is a few MB)
             uint64_t lo = (xfb_addr[b] & ~0xFFFFFull) - (16ull << 20);
             xm_lo = lo < gwin_base ? gwin_base : lo;
@@ -5109,7 +5135,7 @@ static bool xm_prepare(void) {
         }
     }
     for (int b = 0; b < 4; b++) {
-        if (!xfb_addr[b] || !xfb_size[b]) continue;
+        if (!xfb_addr[b] || !xfb_size[b] || !xm_buffer_used(b)) continue;
         uint64_t o = xfb_addr[b] - xm_lo;
         uint32_t now = (uint32_t)vk_frame_counter() + 1;
         for (uint64_t c = o / XM_CHUNK; c <= (o + xfb_size[b] - 1) / XM_CHUNK; c++) xm_written[c] = now;
