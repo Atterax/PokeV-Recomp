@@ -25,8 +25,18 @@
 > **Development will be slower for a while**, as my main focus right now is
 > [PokeL-ARecomp](https://github.com/fabioschmidt01/PokeL-ARecomp).
 
+> [!NOTE]
+> **Latest updates (v0.0.23 to v0.0.27): big improvements in performance and stability, and many bug fixes.**
+> - **Hair no longer glows purple / cyan** (found and fixed by [Atterax](https://github.com/Atterax), [#4](../../pull/4)).
+>   Some safeguards in this fix are still to be added.
+> - **Normal game speed below 60 fps**: no more slow motion at 40-50 fps.
+> - **No more white specks** along triangle edges on Intel and AMD GPUs.
+> - **Linux**: PokeV-Recomp's own data folder, and other games' files are refused instead of being compiled over
+>   (by [didslima](https://github.com/didslima), [#2](../../pull/2)).
+> - The supported game version is shown correctly as **4.0.0** (reported by Atterax, [#3](../../issues/3)).
+
 **PokeV-Recomp** (SV Recomp) turns the Nintendo Switch code of *Pokémon Violet* into a native 64-bit program for
-Windows (and Linux, untested so far).
+Windows (and Linux, barely tested so far).
 The game's ARM64 machine code is translated ahead of time into C and compiled for x86-64 on your own PC. The Switch's
 operating system services, file system, audio and NVN graphics are re-implemented on top of Vulkan.
 
@@ -49,8 +59,8 @@ finished and has only been tested on one machine (Intel Arc B580, Xeon E5-2650 v
 - The frame rate is unsteady in the open world (around 40 fps on the test machine, with drops), and there are hitches
   the first time each shader is compiled.
 - Only *Pokémon Violet* 4.0.0 is recognised. *Pokémon Scarlet* is not supported yet.
-- **Linux is untested.** Releases include an AppImage built automatically from the same code, but nobody has run it on
-  real hardware yet. Reports are welcome ([docs/linux.md](docs/linux.md) lists what to include).
+- **Linux is barely tested.** Releases include an AppImage built automatically from the same code. A contributor
+  started it and checked the setup on Bazzite (RTX 5070 Ti); nobody has reported a full play session yet. Reports are welcome ([docs/linux.md](docs/linux.md) lists what to include).
 
 Every fix and its validation state is logged in
 [HISTORICO_CORRECOES_E_DESENVOLVIMENTO.md](HISTORICO_CORRECOES_E_DESENVOLVIMENTO.md) (in Portuguese).
@@ -136,6 +146,21 @@ changed in the F1 menu.
 | F10 | Performance overlay |
 | F11 | Toggle fullscreen |
 | F12 | Save a screenshot to `screenshots/` |
+
+---
+
+## Contributors
+
+Thank you to everyone who reported problems and sent fixes: without them these bugs would not have been found.
+
+- **[Atterax](https://github.com/Atterax)**: found and fixed the purple / cyan hair - the shader translator ignored
+  the condition code of branches, so the lighting took the wrong path for hair ([#4](../../pull/4)); reported that the
+  supported update is the game's 4.0.0, not 3.0.1 ([#3](../../issues/3)); added `LARECOMP_CLOCK` for repeatable tests.
+- **[didslima](https://github.com/didslima)**: tested the Linux AppImage on Bazzite, reported that it shared Legends:
+  Arceus's data folder ([#1](../../issues/1)) and fixed it: PokeV-Recomp's own data folder, only Pokémon Violet's
+  files accepted, PokeV-Recomp names in the AppImage, with tests ([#2](../../pull/2)).
+
+Reports and pull requests are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
 
