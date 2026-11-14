@@ -9,7 +9,28 @@
 static const uint8_t clock_uuid[16] = {0x4c, 0x41, 0x52, 0x65, 0x63, 0x6f, 0x6d, 0x70, 1, 2, 3, 4, 5, 6, 7, 8};
 
 static int64_t steady_seconds(void) { return (int64_t)(rt_ticks() / 19200000ull); }
-static int64_t unix_now(void) { return (int64_t)time(NULL); }
+// (test) LARECOMP_CLOCK=HH:MM: the clock starts at that local time today and runs on from there. Scarlet / Violet's
+// day and night run on a fast cycle (about 72 minutes) worked out from the clock, so a scripted run from the same save
+// shows another sky every few minutes: a night scene turned to dawn halfway through the hair investigation. With the
+// same HH:MM, runs taken hours apart see the same sky and the same lights.
+static int64_t unix_now(void) {
+    static int64_t offset = -1;
+    if (offset == -1) {
+        int64_t off = 0;
+        const char *v = getenv("LARECOMP_CLOCK");
+        int h, m;
+        if (v && sscanf(v, "%d:%d", &h, &m) == 2) {
+            time_t now = time(NULL);
+            struct tm tm;
+            localtime_r(&now, &tm);
+            tm.tm_hour = h, tm.tm_min = m, tm.tm_sec = 0, tm.tm_isdst = -1;
+            off = (int64_t)mktime(&tm) - (int64_t)now;
+            LOG("[time] LARECOMP_CLOCK: the clock starts at %02d:%02d\n", h, m);
+        }
+        offset = off == -1 ? 0 : off;
+    }
+    return (int64_t)time(NULL) + offset;
+}
 
 static void write_system_context(uint8_t *p) {  // SystemClockContext (0x20)
     int64_t steady = steady_seconds();
