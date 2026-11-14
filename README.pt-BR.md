@@ -48,7 +48,6 @@ terminado e só foi testado em uma máquina (Intel Arc B580, Xeon E5-2650 v4, Wi
 **Problemas conhecidos**
 
 - Pontinhos brancos ao longo das bordas dos triângulos no terreno e na grama.
-- O cabelo dos personagens pode aparecer em ciano brilhante.
 - A taxa de quadros é instável no mundo aberto (em torno de 40 fps na máquina de teste, com quedas), e há travadinhas
   na primeira vez que cada shader é compilado.
 - Só o *Pokémon Violet* 3.0.1 é reconhecido. O *Pokémon Scarlet* ainda não é suportado.

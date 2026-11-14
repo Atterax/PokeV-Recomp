@@ -47,7 +47,6 @@ finished and has only been tested on one machine (Intel Arc B580, Xeon E5-2650 v
 **Known issues**
 
 - Small white specks along triangle edges on terrain and grass.
-- Character hair can render bright cyan.
 - The frame rate is unsteady in the open world (around 40 fps on the test machine, with drops), and there are hitches
   the first time each shader is compiled.
 - Only *Pokémon Violet* 3.0.1 is recognised. *Pokémon Scarlet* is not supported yet.
