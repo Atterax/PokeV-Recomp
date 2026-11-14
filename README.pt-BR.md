@@ -47,10 +47,9 @@ terminado e só foi testado em uma máquina (Intel Arc B580, Xeon E5-2650 v4, Wi
 
 **Problemas conhecidos**
 
-- Pontinhos brancos ao longo das bordas dos triângulos no terreno e na grama.
 - A taxa de quadros é instável no mundo aberto (em torno de 40 fps na máquina de teste, com quedas), e há travadinhas
   na primeira vez que cada shader é compilado.
-- Só o *Pokémon Violet* 3.0.1 é reconhecido. O *Pokémon Scarlet* ainda não é suportado.
+- Só o *Pokémon Violet* 4.0.0 é reconhecido. O *Pokémon Scarlet* ainda não é suportado.
 - **O Linux ainda não foi testado.** As releases incluem um AppImage compilado automaticamente a partir do mesmo
   código, mas ninguém o rodou em hardware real ainda. Relatos são bem-vindos ([docs/linux.md](docs/linux.md) lista o
   que incluir).
@@ -92,8 +91,8 @@ disponíveis no menu F1; nem todos foram validados com o *Pokémon Violet* ainda
 
 | Jogo | Title ID | Versão | Build ID (`main`) | Estado |
 |---|---|---|---|---|
-| **Pokémon Violet** | `01008F6008C5E000` | **3.0.1** (update v786432) | `709BFD6611529864` | Suportado |
-| **Pokémon Scarlet** | `0100A3D008C5C000` | 3.0.1 | - | Ainda não suportado |
+| **Pokémon Violet** | `01008F6008C5E000` | **4.0.0** (update v786432) | `709BFD6611529864` | Suportado |
+| **Pokémon Scarlet** | `0100A3D008C5C000` | 4.0.0 | - | Ainda não suportado |
 
 ---
 
@@ -115,12 +114,12 @@ disponíveis no menu F1; nem todos foram validados com o *Pokémon Violet* ainda
    `PokeV-Recomp-linux-x86_64.AppImage`, sem teste - dê permissão de execução e abra; os passos abaixo são os mesmos).
 2. Extraia em uma pasta com permissão de escrita (por exemplo `C:\Jogos\PokeV-Recomp`).
 3. Tenha em mãos a sua própria cópia do jogo, de um destes jeitos:
-   - o jogo extraído (pastas `exefs` e `romfs`) na versão **3.0.1** - sem precisar de keys; ou
-   - o seu dump: o jogo base (`.xci` ou `.nsp`), a **atualização 3.0.1** (`.nsp`) e o `prod.keys` do seu próprio
+   - o jogo extraído (pastas `exefs` e `romfs`) na versão **4.0.0** - sem precisar de keys; ou
+   - o seu dump: o jogo base (`.xci` ou `.nsp`), a **atualização 4.0.0** (`.nsp`) e o `prod.keys` do seu próprio
      console.
 4. Abra o `PokeV-Recomp.exe`.
 5. Na tela inicial, escolha a pasta com os arquivos do jogo e clique em **Preparar o jogo**.
-   A versão do jogo é conferida antes: só Pokémon Violet 3.0.1 é preparado (Scarlet, outras versões e arquivos de
+   A versão do jogo é conferida antes: só Pokémon Violet 4.0.0 é preparado (Scarlet, outras versões e arquivos de
    outros jogos são recusados, com o motivo na tela). No Linux, os arquivos do jogo, saves e configurações ficam em
    `~/.local/share/pokev-recomp` (veja [docs/linux.md](docs/linux.md)); o `prod.keys` também é encontrado em `~/.switch`.
 6. A primeira configuração recompila o código do jogo no seu PC. Leva de 10 a 30 minutos, conforme o processador, e

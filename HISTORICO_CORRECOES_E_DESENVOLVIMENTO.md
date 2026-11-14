@@ -966,4 +966,35 @@ listras por triângulo em tudo que é iluminado. Céu, HUD e minimapa não passa
 
 ---
 
+## 34. Cabelo Corrigido, Linux com Pasta Própria e Versão 4.0.0 (v0.0.27)
+
+### A. Cabelo roxo / ciano (PR #4, Atterax)
+- Causa: o shader de iluminação (fs 74421cd200) pula as luzes locais com `ISET.NE.CC RZ, R47, 7` seguido de
+  `@P0 BRA CC.NEU`: todo modelo pula, menos o 7 (cabelo). O tradutor ignorava o teste de CC do BRA (bits 0..4) e o
+  `.CC` do ISET, então o cabelo também pulava, passava por cima do código que zera os termos da luz
+  (`@P4 MOV R10/R4/R11, RZ`) e somava o que sobrava da luz do sol: brilho roxo / azul / ciano, mudando com a câmera.
+  Bate com a investigação das seções 32-33 (no GLSL: o `if (p0) tgt = 13656u;` logo depois dos `if (p4) ... = 0u`).
+- `translate.c`: o teste de CC do BRA entra na guarda do predicado; `ISET.CC` grava as flags zero / sinal;
+  `cc_test` compartilhado com o CSETP. Testes de carry / overflow continuam não modelados. Mais
+  `LARECOMP_CLOCK=HH:MM` (`services/time.c`) para fixar o relógio do jogo em testes.
+- Os testes de bisseção `TESTE_CABELO_*.bat` (seção 33) ficaram desnecessários.
+
+### B. Linux (PR #2, didslima; fecha a issue #1)
+- A pasta de dados do Linux era a do PokeL-ARecomp (`~/.local/share/plarecomp`), e a tela inicial aceitava builds
+  do Arceus, Z-A e Link's Awakening: com o Arceus instalado, "Compilar agora" rodaria o gerador no código dele.
+  Agora: pasta própria `~/.local/share/pokev-recomp`; tabela única de builds em `runtime/game_identity.h` (só o
+  Violet é aceito, os outros são recusados pelo nome); nomes "ZA Recomp" trocados por PokeV-Recomp em logs,
+  `.desktop` e AppImage; no Windows o `logs/play.log` passa a ser gravado para o Violet. Testes novos
+  `tools/test_game_identity.py` e `tools/test_data_dir.py`.
+
+### C. A versão do jogo é 4.0.0 (issue #3, Atterax)
+- O build `709BFD6611529864` (atualização v786432) é a **4.0.0** do jogo (`control.nacp`), não a 3.0.1. Rótulo
+  trocado em README, launcher, menu F1, `game_identity.h`, docs e workflow. `tools/sv_patches.py` mantém o nome
+  antigo por enquanto: ele entra no `GAMELIB_ID` e mudá-lo obrigaria todos a recompilar.
+- Consequência: o KarPur (que usa a 4.0.0) tem os mesmos endereços que nós, 1:1.
+- README: os pontinhos brancos saem dos problemas conhecidos (corrigidos na v0.0.24).
+- Versão **`v0.0.27`**. Só runtime: o jogo **não** recompila; o cache de traduções de shader é refeito uma vez.
+
+---
+
 *Documento mantido em sincronia contínua pelo assistente de IA Antigravity (Google DeepMind).*

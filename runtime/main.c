@@ -302,7 +302,7 @@ int main(int argc, char **argv) {
         else if (argv[i][0] != '-') root = arg_root;
     }
     rt_paths_init();  // the data root becomes the working directory (runtime/paths.h)
-    {   // Pokémon Violet 3.0.1 (runtime/game_identity.h; until v0.0.24 this list was Z-A's and Arceus's builds, copied
+    {   // Pokémon Violet 4.0.0 (runtime/game_identity.h; until v0.0.24 this list was Z-A's and Arceus's builds, copied
         // over, and Violet's own wasn't in it): the start screen sets its files up from the player's packages
         // (zaimport). Started without a log redirect (a double click): the log goes to logs/play.log (the previous one:
         // logs/play-anterior.log).

@@ -84,7 +84,7 @@ static void save_png(id<MTLTexture> tex, const char *path) {
 }
 #endif
 
-// The version of a main module's build id: NULL = not Pokémon Violet 3.0.1 (runtime/game_identity.h). Link's
+// The version of a main module's build id: NULL = not Pokémon Violet 4.0.0 (runtime/game_identity.h). Link's
 // Awakening, Z-A and Legends: Arceus builds used to pass here too, so another recomp's extracted/ in the data folder
 // counted as set up ("Compile now" on Arceus's files, issue #1): they are refused now, by name.
 static const char *build_version(const uint8_t id[8]) { return game_identity_supported(id); }
@@ -93,7 +93,7 @@ static const char *build_version(const uint8_t id[8]) { return game_identity_sup
 static bool build_is_za(const uint8_t id[8]) { return build_version(id) != NULL; }
 // The release tag this build is (also names the release files; Makefile / tools/bundle_macos.sh / make_dmg.sh read
 // it): ZA Recomp's v<major>.<minor>.<patch> (Hexveil404/PokeZ-ARecomp releases).
-#define LARECOMP_VERSION "v0.0.26"
+#define LARECOMP_VERSION "v0.0.27"
 extern "C" const char *rt_version(void) { return LARECOMP_VERSION; }  // (runtime/main.c: the log's first line)
 extern "C" const char *larecomp_version(void) { return LARECOMP_VERSION; }  // (the shader caches' tag)
 
@@ -416,7 +416,7 @@ static const char *fail_hint(int k, bool pt) {
         "dump (.xci / .nsp) and your prod.keys.",
         "Pok\xc3\xa9mon Violet's base game isn't among those files. Choose the folder with your own dump.",
         "Make sure there's about 12 GB free and try again.",
-        "PokeV-Recomp runs version 3.0.1 of the game (base game + update v786432).",
+        "PokeV-Recomp runs version 4.0.0 of the game (base game + update v786432).",
         "Some files are missing. Choose the folder again; if it happens again, dump the game again.",
         "Make sure there's about 4 GB free and try again. If it keeps happening, report it on GitHub.",
         "Put the prod.keys (and title.keys) dumped from your own Switch in the folder with the game files. Any file "
@@ -428,7 +428,7 @@ static const char *fail_hint(int k, bool pt) {
         "e o seu prod.keys.",
         "O jogo base de Pokémon Violet não está entre esses arquivos. Escolha a pasta com o seu próprio dump.",
         "Veja se há uns 12 GB livres e tente de novo.",
-        "O PokeV-Recomp roda a versão 3.0.1 do jogo (jogo base + atualização v786432).",
+        "O PokeV-Recomp roda a versão 4.0.0 do jogo (jogo base + atualização v786432).",
         "Faltam arquivos. Escolha a pasta de novo; se acontecer outra vez, faça o dump do jogo de novo.",
         "Veja se há uns 4 GB livres e tente de novo. Se continuar, avise no GitHub.",
         "Coloque o prod.keys (e o title.keys) do seu próprio Switch na pasta dos arquivos do jogo. Qualquer nome serve "
@@ -481,7 +481,7 @@ static std::string build_id_detail(const std::string &main_path) {
     if (!read_build_id(main_path, id)) return "";
     char what[128];
     game_identity_describe(id, what, sizeof what);
-    fprintf(stderr, "[launcher] %s: %s, not Pok\xc3\xa9mon Violet 3.0.1 - refused\n", main_path.c_str(), what);
+    fprintf(stderr, "[launcher] %s: %s, not Pok\xc3\xa9mon Violet 4.0.0 - refused\n", main_path.c_str(), what);
     return std::string(TR("These files are ", "Esses arquivos são de ")) + what + ".";
 }
 
@@ -827,7 +827,7 @@ static bool build_game_code(void) {
     if (jobs < 1) jobs = 1;
     if (jobs > 10) jobs = 10;
     GameBuildOpts o = {build_progress, jobs, build_cancelled};
-    // (only Pokémon Violet 3.0.1's code is ever compiled: every path here checked it already - this is the last
+    // (only Pokémon Violet 4.0.0's code is ever compiled: every path here checked it already - this is the last
     // word, so no other game's files in the data folder can reach the generator, issue #1)
     if (!build_id_ok(g_root + "/exefs/main")) {
         set_failure(FAIL_VERSION, build_id_detail(g_root + "/exefs/main"));

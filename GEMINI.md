@@ -1,6 +1,6 @@
 # PokeV-Recomp: Developer & Architecture Guide (Antigravity / Gemini)
 
-Port nativo e recompilador estático para PC de **Pokémon Scarlet & Violet (3.0.1)**, adaptado e otimizado a partir do projeto PokeL-ARecomp / PokeZ-ARecomp / LAS Recomp por **@fabioschmidt01** em colaboração com o assistente de IA **Antigravity (Google DeepMind / Gemini)**.
+Port nativo e recompilador estático para PC de **Pokémon Scarlet & Violet (4.0.0)**, adaptado e otimizado a partir do projeto PokeL-ARecomp / PokeZ-ARecomp / LAS Recomp por **@fabioschmidt01** em colaboração com o assistente de IA **Antigravity (Google DeepMind / Gemini)**.
 
 O código ARM64 do Nintendo Switch é traduzido antecipadamente (AOT) para C puro e compilado para x86-64 nativo; o runtime recria o microkernel Horizon do Switch e o subsistema gráfico NVN diretamente sobre a API **Vulkan**.
 
@@ -15,7 +15,7 @@ O código ARM64 do Nintendo Switch é traduzido antecipadamente (AOT) para C pur
 | **Title ID Update Violet** | `01008F6008C5E800` |
 | **Title ID Base Scarlet** | `0100A3D008C5C000` |
 | **Title ID Update Scarlet** | `0100A3D008C5C800` |
-| **Versão Homologada** | **3.0.1** (Update v786432) |
+| **Versão Homologada** | **4.0.0** (Update v786432) |
 | **Build ID (`main`)** | `709BFD6611529864` |
 | **Módulos Convidados** | `main`, `sdk`, `subsdk0` |
 
@@ -60,7 +60,7 @@ PokeV-Recomp-privado/
 ├── docs/                     # Documentação de arquitetura e notas de compilação
 ├── extracted/                # (Ignorado no git) Arquivos do jogo extraídos
 │   ├── exefs/                # main, sdk, subsdk0, main.npdm
-│   └── romfs.bin             # RomFS de ~9.92 GB gerada com patch 3.0.1
+│   └── romfs.bin             # RomFS de ~9.92 GB gerada com patch 4.0.0
 ├── runtime/
 │   ├── gamebuild.c           # Orquestrador de geração e compilação do jogo
 │   ├── loader.c              # Carregador de NSO com suporte a subsdk0

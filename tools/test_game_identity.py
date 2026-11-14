@@ -1,4 +1,4 @@
-"""Game identity (runtime/game_identity.h): only Pokémon Violet 3.0.1 is accepted for setup and compilation; Legends:
+"""Game identity (runtime/game_identity.h): only Pokémon Violet 4.0.0 is accepted for setup and compilation; Legends:
 Arceus, Z-A and Link's Awakening files are refused by name (issue #1). Also checks the start screen and main.c take
 their answer from that header, not a table of their own. Fake NSO headers in a scratch folder; no game files used."""
 import os
@@ -25,10 +25,11 @@ with tempfile.TemporaryDirectory() as directory:
 # The SV build id must agree with the generator's (tools/sv_patches.py SV_BUILDS: what gen.py patches as Violet)
 sv = (ROOT / 'tools/sv_patches.py').read_text()
 header = (ROOT / 'runtime/game_identity.h').read_text()
-m = re.search(r'\{\{([^}]*)\}, "Pok\\xc3\\xa9mon Violet", "3\.0\.1", true\}', header)
-assert m, 'Violet 3.0.1 entry not found in game_identity.h'
+m = re.search(r'\{\{([^}]*)\}, "Pok\\xc3\\xa9mon Violet", "4\.0\.0", true\}', header)
+assert m, 'Violet 4.0.0 entry not found in game_identity.h'
 violet = ''.join(b.strip()[2:] for b in m.group(1).split(','))
-assert f"'{violet}': '3.0.1'" in sv, f'{violet} is not tools/sv_patches.py SV_BUILDS\'s Violet 3.0.1'
+# (SV_BUILDS still labels it 3.0.1, its name before issue #3: the build id is what must agree)
+assert f"'{violet}': " in sv, f'{violet} is not in tools/sv_patches.py SV_BUILDS'
 
 # The start screen and main.c take the answer from the header: no build table of their own that could let another
 # game's files through again (v0.0.24's launcher accepted Arceus 1.1.1, Z-A and Link's Awakening)
@@ -42,4 +43,4 @@ for src, name in ((launcher, 'launcher.mm'), (main, 'main.c')):
 assert launcher.count('gamebuild_run(') == 1
 body = launcher[launcher.index('static bool build_game_code(void)'):]
 assert body.index('build_id_ok(g_root + "/exefs/main")') < body.index('gamebuild_run(')
-print('only Pokémon Violet 3.0.1 is set up and compiled; Arceus / Z-A / Link\'s Awakening files are refused by name')
+print('only Pokémon Violet 4.0.0 is set up and compiled; Arceus / Z-A / Link\'s Awakening files are refused by name')

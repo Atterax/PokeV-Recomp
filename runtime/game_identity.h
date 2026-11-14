@@ -1,9 +1,10 @@
 // Which game a set of game files is, from its exefs/main build ID (the NSO header's first 8 bytes at 0x40), and
 // whether PokeV-Recomp runs it. Header-only (C and C++: runtime/ui/launcher.mm, runtime/main.c, tools/test_game_identity.c).
 //
-// Only Pokémon Violet 3.0.1 is accepted (tools/sv_patches.py SV_BUILDS). The other builds below are the ones this
-// runtime's ancestors (LAS Recomp, ZA Recomp, PokeL-ARecomp) set up: they are *recognised*, never accepted, so the
-// start screen can say "these are Pokémon Legends: Arceus's files" instead of offering to compile them. Before
+// Only Pokémon Violet 4.0.0 is accepted (tools/sv_patches.py SV_BUILDS, which still calls it 3.0.1: until v0.0.27
+// the project took update v786432 for 3.0.1 - its control.nacp says 4.0.0, issue #3). The other builds below are the
+// ones this runtime's ancestors (LAS Recomp, ZA Recomp, PokeL-ARecomp) set up: they are *recognised*, never accepted,
+// so the start screen can say "these are Pokémon Legends: Arceus's files" instead of offering to compile them. Before
 // v0.0.25 the start screen accepted all of them, and on Linux its data folder was PokeL-ARecomp's
 // (~/.local/share/plarecomp): Arceus's extracted/ there passed as "set up, needs a rebuild" (issue #1).
 #pragma once
@@ -20,8 +21,8 @@ typedef struct {
 } GameIdentity;
 
 static const GameIdentity GAME_IDENTITIES[] = {
-    // Pokémon Violet 3.0.1 (update v786432; title 01008F6008C5E000): the one game PokeV-Recomp runs
-    {{0x70, 0x9b, 0xfd, 0x66, 0x11, 0x52, 0x98, 0x64}, "Pok\xc3\xa9mon Violet", "3.0.1", true},
+    // Pokémon Violet 4.0.0 (update v786432; title 01008F6008C5E000): the one game PokeV-Recomp runs
+    {{0x70, 0x9b, 0xfd, 0x66, 0x11, 0x52, 0x98, 0x64}, "Pok\xc3\xa9mon Violet", "4.0.0", true},
     // recognised only (refused, with their name)
     {{0xae, 0xe8, 0xf1, 0x50, 0xdd, 0xa1, 0xb5, 0xa8}, "Pok\xc3\xa9mon Legends: Arceus", "1.1.1", false},
     {{0x72, 0x22, 0xe1, 0x3e, 0xcf, 0x6a, 0xdb, 0x32}, "Pok\xc3\xa9mon Legends: Z-A", "1.0.0", false},

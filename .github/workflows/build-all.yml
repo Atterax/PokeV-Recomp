@@ -178,7 +178,7 @@ jobs:
           body: |
             ## PokeV-Recomp ${{ github.ref_name }}
 
-            Native PC port of **Pokémon Violet** (3.0.1) by static recompilation. Work in progress: see the README for
+            Native PC port of **Pokémon Violet** (4.0.0) by static recompilation. Work in progress: see the README for
             the current status and the known issues.
 
             ### Files

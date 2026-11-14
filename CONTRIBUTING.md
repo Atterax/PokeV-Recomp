@@ -104,7 +104,7 @@ The comparison checks every generated C file byte-for-byte.
 `python tools/test_save.py` exercises the production save handlers against temporary files, without game data.
 
 Game identity and data folder (no game files; scratch folders only):
-`python tools/test_game_identity.py` checks that only Pokémon Violet 3.0.1 is set up and compiled (other games'
+`python tools/test_game_identity.py` checks that only Pokémon Violet 4.0.0 is set up and compiled (other games'
 builds refused by name), with `CC` and `CXX`. On Linux, `DEPS=<prefix with SDL3> python tools/test_data_dir.py`
 checks the data folder (`$XDG_DATA_HOME/pokev-recomp`, `~/.local/share/pokev-recomp`) and that other recomps'
 folders and game files are never touched, like `tools/test_delete_guard.py`. In the release build image, after

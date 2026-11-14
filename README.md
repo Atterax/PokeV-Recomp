@@ -46,10 +46,9 @@ finished and has only been tested on one machine (Intel Arc B580, Xeon E5-2650 v
 
 **Known issues**
 
-- Small white specks along triangle edges on terrain and grass.
 - The frame rate is unsteady in the open world (around 40 fps on the test machine, with drops), and there are hitches
   the first time each shader is compiled.
-- Only *Pokémon Violet* 3.0.1 is recognised. *Pokémon Scarlet* is not supported yet.
+- Only *Pokémon Violet* 4.0.0 is recognised. *Pokémon Scarlet* is not supported yet.
 - **Linux is untested.** Releases include an AppImage built automatically from the same code, but nobody has run it on
   real hardware yet. Reports are welcome ([docs/linux.md](docs/linux.md) lists what to include).
 
@@ -88,8 +87,8 @@ available in the F1 menu; not all of them have been validated with *Pokémon Vio
 
 | Game | Title ID | Version | `main` build ID | Status |
 |---|---|---|---|---|
-| **Pokémon Violet** | `01008F6008C5E000` | **3.0.1** (update v786432) | `709BFD6611529864` | Supported |
-| **Pokémon Scarlet** | `0100A3D008C5C000` | 3.0.1 | - | Not supported yet |
+| **Pokémon Violet** | `01008F6008C5E000` | **4.0.0** (update v786432) | `709BFD6611529864` | Supported |
+| **Pokémon Scarlet** | `0100A3D008C5C000` | 4.0.0 | - | Not supported yet |
 
 ---
 
@@ -111,12 +110,12 @@ available in the F1 menu; not all of them have been validated with *Pokémon Vio
    `PokeV-Recomp-linux-x86_64.AppImage`, untested - make it executable and run it; the steps below are the same).
 2. Extract it into a folder you can write to (for example `C:\Games\PokeV-Recomp`).
 3. Have your own copy of the game ready, in one of these forms:
-   - the game extracted (`exefs` and `romfs` folders) at version **3.0.1** - no keys needed; or
-   - your dump: the base game (`.xci` or `.nsp`), the **3.0.1 update** (`.nsp`) and the `prod.keys` from your own
+   - the game extracted (`exefs` and `romfs` folders) at version **4.0.0** - no keys needed; or
+   - your dump: the base game (`.xci` or `.nsp`), the **4.0.0 update** (`.nsp`) and the `prod.keys` from your own
      console.
 4. Run `PokeV-Recomp.exe`.
 5. On the start screen, choose the folder with your game files and click **Set up the game**.
-   The game's version is checked first: only Pokémon Violet 3.0.1 is set up (Scarlet, other versions and other
+   The game's version is checked first: only Pokémon Violet 4.0.0 is set up (Scarlet, other versions and other
    games' files are refused, with the reason on screen). On Linux, the game files, saves and settings live in
    `~/.local/share/pokev-recomp` (see [docs/linux.md](docs/linux.md)); `prod.keys` is also found in `~/.switch`.
 6. The first setup recompiles the game's code on your PC. It takes 10 to 30 minutes depending on the CPU and happens

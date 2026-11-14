@@ -15,9 +15,9 @@ On Linux 6.7 or newer the renderer also gets page write tracking (userfaultfd + 
 its vertex cache, and textures re-checked only where the game wrote. Older kernels run without it (the log says
 `[plat] no page write tracking: ...`); `LARECOMP_WRITE_TRACKING=0` turns it off.
 The start screen asks for the folder with your own game files and sets them up. PokeV-Recomp: choose the folder
-with your Pokémon Violet dump (base `.nsp` / `.xci`, the 3.0.1 update `.nsp`, optionally the DLC) or an extracted
+with your Pokémon Violet dump (base `.nsp` / `.xci`, the 4.0.0 update `.nsp`, optionally the DLC) or an extracted
 `exefs` + `romfs`; `prod.keys` / `title.keys` are found in that folder (a few levels down too), next to it, or in
-`~/.switch`. **Set up the game** reads them (your files are only read), checks the game is Pokémon Violet 3.0.1
+`~/.switch`. **Set up the game** reads them (your files are only read), checks the game is Pokémon Violet 4.0.0
 (`exefs/main` build ID `709BFD6611529864`: `runtime/game_identity.h`) and only then compiles the game code. Other
 versions, Scarlet, and other recomps' game files (Legends: Arceus, Z-A, Link's Awakening) are refused by name, and
 game files of another app are never deleted or written over, even when its folder ends up as the data folder.

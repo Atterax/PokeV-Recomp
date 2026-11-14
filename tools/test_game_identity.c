@@ -1,4 +1,4 @@
-// Game identity (runtime/game_identity.h): only Pokémon Violet 3.0.1's exefs/main is accepted; Legends: Arceus, Z-A
+// Game identity (runtime/game_identity.h): only Pokémon Violet 4.0.0's exefs/main is accepted; Legends: Arceus, Z-A
 // and Link's Awakening are recognised by name and refused (issue #1: Arceus's extracted/ passed as PokeV's), unknown
 // builds refused. Builds fake NSO headers in a scratch folder: tools/test_game_identity.py <empty scratch dir>.
 #include <stdio.h>
@@ -50,13 +50,13 @@ int main(int argc, char **argv) {
     char p[1100], desc[160];
     uint8_t id[8];
 
-    // Pokémon Violet 3.0.1: the one build accepted
+    // Pokémon Violet 4.0.0: the one build accepted
     snprintf(p, sizeof p, "%s/violet_main", dir);
     put_main(p, VIOLET_301, 0x80);
     CHECK(game_identity_read(p, id));
-    CHECK(game_identity_supported(id) && !strcmp(game_identity_supported(id), "3.0.1"));
+    CHECK(game_identity_supported(id) && !strcmp(game_identity_supported(id), "4.0.0"));
     game_identity_describe(id, desc, sizeof desc);
-    CHECK(!strcmp(desc, "Pok\xc3\xa9mon Violet 3.0.1"));
+    CHECK(!strcmp(desc, "Pok\xc3\xa9mon Violet 4.0.0"));
 
     // the ancestors' builds: recognised, refused by name (the start screen says whose files they are)
     refused(dir, "arceus_main", ARCEUS_111, "Pok\xc3\xa9mon Legends: Arceus 1.1.1");
@@ -79,7 +79,7 @@ int main(int argc, char **argv) {
     put_main(p, VIOLET_301, 0x44);
     CHECK(!game_identity_read(p, id));
 
-    // exactly one supported entry, and it is Violet 3.0.1
+    // exactly one supported entry, and it is Violet 4.0.0
     int supported = 0;
     for (size_t i = 0; i < sizeof GAME_IDENTITIES / sizeof *GAME_IDENTITIES; i++)
         if (GAME_IDENTITIES[i].supported) {
