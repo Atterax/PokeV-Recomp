@@ -5057,6 +5057,13 @@ static uint64_t xm_lo;  // guest address of the mirror's first byte (0: not plac
 // mirror - the game reuses the arena's memory (other data written by the CPU when areas / outfits change: read from
 // the mirror, a stale skinning drew the player black)
 static uint32_t xm_written[XM_SIZE / XM_CHUNK];
+// ... and the bytes of the chunk written that frame (one interval [lo, hi); two apart: the larger kept, the other then
+// read from the heap). A chunk counted as written whole when a session wrote any of it: a stream sharing the chunk
+// with another character's output - a few hundred bytes each in the arena - was read from the mirror where this frame
+// wrote nothing of it, the bytes of an earlier session, while the heap held what the game wrote there since: black
+// triangles hanging off an NPC and following it (a check of each mirror read against the bytes written found ~1 read
+// in 100 in a town).
+static uint16_t xm_wlo[XM_SIZE / XM_CHUNK], xm_whi[XM_SIZE / XM_CHUNK];
 static VkBufferCopy xm_back[256];  // this submission's written ranges (mirror -> heap)
 static int xm_back_n;
 static bool xm_draw;  // this draw's transform feedback goes to the mirror
@@ -5078,8 +5085,11 @@ static bool xm_inside(uint64_t a, uint64_t n) { return xm_lo && a >= xm_lo && a 
 static bool xm_all_written(uint64_t a, uint64_t n) {
     if (!n || !xm_inside(a, n)) return false;
     uint32_t now = (uint32_t)vk_frame_counter() + 1;
-    for (uint64_t c = (a - xm_lo) / XM_CHUNK; c <= (a + n - 1 - xm_lo) / XM_CHUNK; c++)
-        if (xm_written[c] != now) return false;
+    uint64_t s0 = a - xm_lo, s1 = s0 + n;
+    for (uint64_t c = s0 / XM_CHUNK; c <= (s1 - 1) / XM_CHUNK; c++) {
+        uint64_t clo = c * XM_CHUNK, l = s0 > clo ? s0 - clo : 0, h = s1 < clo + XM_CHUNK ? s1 - clo : XM_CHUNK;
+        if (xm_written[c] != now || l < xm_wlo[c] || h > xm_whi[c]) return false;
+    }
     return true;
 }
 
@@ -5138,7 +5148,16 @@ static bool xm_prepare_(void) {
         if (!xfb_addr[b] || !xfb_size[b] || !xm_buffer_used(b)) continue;
         uint64_t o = xfb_addr[b] - xm_lo;
         uint32_t now = (uint32_t)vk_frame_counter() + 1;
-        for (uint64_t c = o / XM_CHUNK; c <= (o + xfb_size[b] - 1) / XM_CHUNK; c++) xm_written[c] = now;
+        for (uint64_t c = o / XM_CHUNK; c <= (o + xfb_size[b] - 1) / XM_CHUNK; c++) {
+            uint64_t clo = c * XM_CHUNK, l = o > clo ? o - clo : 0, h = o + xfb_size[b] < clo + XM_CHUNK ? o + xfb_size[b] - clo : XM_CHUNK;
+            if (xm_written[c] != now || (h - l > (uint64_t)(xm_whi[c] - xm_wlo[c]) && (l > xm_whi[c] || h < xm_wlo[c]))) {
+                xm_wlo[c] = (uint16_t)l, xm_whi[c] = (uint16_t)h;  // (the first this frame, or a larger one apart)
+            } else if (l <= xm_whi[c] && h >= xm_wlo[c]) {  // (touching or overlapping: one interval)
+                if (l < xm_wlo[c]) xm_wlo[c] = (uint16_t)l;
+                if (h > xm_whi[c]) xm_whi[c] = (uint16_t)h;
+            }
+            xm_written[c] = now;
+        }
         int i = 0;
         while (i < xm_back_n && !(xm_back[i].srcOffset == o && xm_back[i].size == xfb_size[b])) i++;
         if (i == xm_back_n) {
