@@ -1546,7 +1546,7 @@ static void vk_end_pass_at(int line) {
     if (prof && line < 4096) prof_end_line[line]++;
     rec_CmdEndRendering(vk_cmd());
     in_pass = false;
-    if (g_debug_frame && st.rt.ncolor && st.rt.color[0] && st.rt.color[0]->backend) {
+    if (g_debug_frame && !ENV("LARECOMP_DEBUG_NOPNG") && st.rt.ncolor && st.rt.color[0] && st.rt.color[0]->backend) {
         char path[256];
         static uint64_t debug_pass_frame = ~0ull;
         static int multi = -1;
@@ -7115,9 +7115,11 @@ static void draw_(CmdRec *r, bool indexed) {
         if (!composite) vp_box_16_9();
     } else if (fabsf(pass_sx - pass_sy) > 0.01f * pass_sy && st.rt.ncolor && st.ubuf[0][0].addr) {
         // HUD layout panes and font text drawn into a reshaped intermediate composite target: centred 16:9 box.
-        extern bool widescreen_ui_boxed(const float *u, uint64_t size);
+        extern bool widescreen_ui_boxed_draw(const float *u, uint64_t size, int ntex,
+                                             const float (*tex_sc)[2], const uint32_t (*tex_wh)[2]);
         const float *u = (const float *)(uintptr_t)st.ubuf[0][0].addr;
-        bool boxed = widescreen_ui_boxed(u, st.ubuf[0][0].size);
+        int ntex = pr->fi->ntex < 64 ? pr->fi->ntex : 64;
+        bool boxed = widescreen_ui_boxed_draw(u, st.ubuf[0][0].size, ntex, tex_sc[1], tex_wh[1]);
         if (boxed) vp_box_16_9();
         if (g_debug_frame && (st.ubuf[0][0].size == 128 || st.ubuf[0][0].size == 560)) {
             LOG("[draw]   ui %s %s: proj %g %g %g %g / %g %g %g %g", st.ubuf[0][0].size == 560 ? "pane" : "text",

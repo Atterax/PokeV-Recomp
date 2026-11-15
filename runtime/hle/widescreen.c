@@ -63,11 +63,16 @@ float widescreen_effect_stretch(uint64_t fs_hash) {
 // width, two dark bars beside the box at 32:9 (user 2026-10-20). A layout (ui2d) draw's vertex uniforms hold the
 // projection (floats 0-15), the pane's model-view rows (16-27) and its rect (132-135: width, height, left, top; y up):
 // true when they describe a pane that doesn't cover the screen (such a draw stays in the 16:9 box).
-bool widescreen_ui_pane_partial(const float *u, uint64_t size) {
+static bool ui_pane_ortho(const float *u, uint64_t size) {
     if (!u || size != 560) return false;
     if (u[15] != 1 || u[12] != 0 || u[13] != 0 || !(u[0] > 0) || u[5] == 0) return false;  // (orthographic projection)
+    float w = u[132], h = u[133];
+    return w > 0 && h > 0 && w < 1e5f && h < 1e5f;
+}
+
+bool widescreen_ui_pane_partial(const float *u, uint64_t size) {
+    if (!ui_pane_ortho(u, size)) return false;
     float w = u[132], h = u[133], l = u[134], t = u[135];
-    if (!(w > 0) || !(h > 0) || !(w < 1e5f) || !(h < 1e5f)) return false;
     float lo[2] = {1e9f, 1e9f}, hi[2] = {-1e9f, -1e9f};
     for (int i = 0; i < 4; i++) {
         float x = l + (i & 1 ? w : 0), y = t - (i & 2 ? h : 0);
@@ -81,8 +86,14 @@ bool widescreen_ui_pane_partial(const float *u, uint64_t size) {
 // Pokémon Scarlet & Violet (like Legends: Arceus) draws its HUD (ui2d layout panes, 560-byte UBOs) and font text
 // (128-byte UBOs) into a 1920x1080 intermediate composite target that the renderer reshaped like the scene:
 // non-fullscreen panes and 16:9-scaled text are boxed into a centred 16:9 viewport so circular/square UI (minimap,
-// icons) and text keep their aspect ratio while full-screen panes (fades, backdrops) still fill the window.
-// LARECOMP_WIDE_UI_BOX=0 disables this boxing.
+// icons) and text keep their aspect ratio while full-screen panes (fades, reshaped effects) still fill the window.
+// Fullscreen panes sampling a static 16:9 artwork texture (e.g. Title Screen, DLC promo art) are also boxed so
+// they keep 16:9 proportions instead of stretching horizontally. LARECOMP_WIDE_UI_BOX=0 disables this boxing.
+static bool ui_box_enabled(void) {
+    static int on = -1;
+    if (on < 0) on = !ENV("LARECOMP_WIDE_UI_BOX") || atoi(ENV("LARECOMP_WIDE_UI_BOX")) != 0;
+    return on && !g_game_is_la;
+}
 static bool ui_text_draw(const float *u, uint64_t size) {
     if (!u || size != 128) return false;
     if (u[12] != 0 || u[13] != 0 || u[14] != 0 || u[15] != 1) return false;
@@ -90,10 +101,24 @@ static bool ui_text_draw(const float *u, uint64_t size) {
     float sx = u[0] * 960, sy = fabsf(u[5]) * 540;
     return sx > 0.05f && sx < 20 && fabsf(sx - sy) < 1e-3f * sx;
 }
+static bool ui_static_16_9_tex(int ntex, const float (*tex_sc)[2], const uint32_t (*tex_wh)[2]) {
+    if (ntex <= 0 || !tex_sc || !tex_wh) return false;
+    for (int i = 0; i < ntex; i++) {
+        float sx = tex_sc[i][0], sy = tex_sc[i][1];
+        if (!(sx > 0) || !(sy > 0) || fabsf(sx - sy) > 0.01f * sy) return false;
+    }
+    uint32_t w = tex_wh[0][0], h = tex_wh[0][1];
+    if (w < 640 || h < 360) return false;
+    return fabsf((float)w * 9.0f - (float)h * 16.0f) <= 0.02f * (float)h * 16.0f;
+}
 bool widescreen_ui_boxed(const float *u, uint64_t size) {
-    static int on = -1;
-    if (on < 0) on = !ENV("LARECOMP_WIDE_UI_BOX") || atoi(ENV("LARECOMP_WIDE_UI_BOX")) != 0;
-    return on && !g_game_is_la && (widescreen_ui_pane_partial(u, size) || ui_text_draw(u, size));
+    return ui_box_enabled() && (widescreen_ui_pane_partial(u, size) || ui_text_draw(u, size));
+}
+bool widescreen_ui_boxed_draw(const float *u, uint64_t size, int ntex,
+                              const float (*tex_sc)[2], const uint32_t (*tex_wh)[2]) {
+    return ui_box_enabled() &&
+           (widescreen_ui_pane_partial(u, size) || ui_text_draw(u, size) ||
+            (ui_pane_ortho(u, size) && ui_static_16_9_tex(ntex, tex_sc, tex_wh)));
 }
 
 // Off in rooms that should keep 16:9 framing (interiors, dungeons) -- see widescreen_update.
