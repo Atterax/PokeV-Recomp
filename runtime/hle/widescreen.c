@@ -78,6 +78,24 @@ bool widescreen_ui_pane_partial(const float *u, uint64_t size) {
     return lo[0] > -0.99f || hi[0] < 0.99f || lo[1] > -0.99f || hi[1] < 0.99f;
 }
 
+// Pokémon Scarlet & Violet (like Legends: Arceus) draws its HUD (ui2d layout panes, 560-byte UBOs) and font text
+// (128-byte UBOs) into a 1920x1080 intermediate composite target that the renderer reshaped like the scene:
+// non-fullscreen panes and 16:9-scaled text are boxed into a centred 16:9 viewport so circular/square UI (minimap,
+// icons) and text keep their aspect ratio while full-screen panes (fades, backdrops) still fill the window.
+// LARECOMP_WIDE_UI_BOX=0 disables this boxing.
+static bool ui_text_draw(const float *u, uint64_t size) {
+    if (!u || size != 128) return false;
+    if (u[12] != 0 || u[13] != 0 || u[14] != 0 || u[15] != 1) return false;
+    if (u[1] != 0 || u[2] != 0 || u[4] != 0 || u[6] != 0 || u[8] != 0 || u[9] != 0) return false;
+    float sx = u[0] * 960, sy = fabsf(u[5]) * 540;
+    return sx > 0.05f && sx < 20 && fabsf(sx - sy) < 1e-3f * sx;
+}
+bool widescreen_ui_boxed(const float *u, uint64_t size) {
+    static int on = -1;
+    if (on < 0) on = !ENV("LARECOMP_WIDE_UI_BOX") || atoi(ENV("LARECOMP_WIDE_UI_BOX")) != 0;
+    return on && !g_game_is_la && (widescreen_ui_pane_partial(u, size) || ui_text_draw(u, size));
+}
+
 // Off in rooms that should keep 16:9 framing (interiors, dungeons) -- see widescreen_update.
 static bool g_allowed = true;
 static bool g_indoor;

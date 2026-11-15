@@ -94,6 +94,8 @@ uint64_t renderer_present_count(void) { return 0; }
 uint64_t renderer_exec_frame(void) { return 0; }
 
 extern bool widescreen_frame_boxed(uint64_t frame);
+extern bool widescreen_ui_boxed(const float *u, uint64_t size);
+extern bool widescreen_ui_pane_partial(const float *u, uint64_t size);
 extern void widescreen_set_factor(float f);
 extern float rt_sv_proj_aspect(float aspect);
 extern float rt_sv_proj_half_fovy(float half_fovy, float aspect);
@@ -128,6 +130,38 @@ int main(void) {
     widescreen_set_factor(1.0f);
     float a16 = rt_sv_proj_aspect(16.0f / 9.0f);
     ok = ok && a16 == 16.0f / 9.0f;
+
+    /* widescreen_ui_boxed(): 560-byte ui2d panes and 128-byte font text in Violet */
+    g_game_is_la = 0;
+    float pane[140] = {0};
+    pane[0] = 1.0f / 960.0f; pane[5] = 1.0f / 540.0f; pane[10] = -0.00125f; pane[15] = 1.0f;
+    pane[16] = 1.0f; pane[19] = 780.0f; pane[21] = 1.0f; pane[23] = -360.0f; pane[26] = 1.0f;
+    pane[132] = 340.0f; pane[133] = 340.0f; pane[134] = -170.0f; pane[135] = 170.0f;  /* minimap pane */
+    ok = ok && widescreen_ui_boxed(pane, sizeof pane);
+
+    /* Fullscreen 560-byte pane (fade/backdrop) must NOT be boxed */
+    pane[19] = 0.0f; pane[23] = 0.0f;
+    pane[132] = 1920.0f; pane[133] = 1080.0f; pane[134] = -960.0f; pane[135] = 540.0f;
+    ok = ok && !widescreen_ui_boxed(pane, sizeof pane);
+
+    /* 128-byte font text draw must be boxed */
+    float text[32] = {0};
+    text[0] = 1.0f / 960.0f; text[3] = 0.4276f;
+    text[5] = -1.0f / 540.0f; text[7] = 0.9148f;
+    text[10] = -0.00125f; text[15] = 1.0f;
+    ok = ok && widescreen_ui_boxed(text, sizeof text);
+
+    /* 128-byte 3D / non-16:9 / rotated matrix must NOT be boxed */
+    float mat3d[32] = {0};
+    mat3d[0] = -0.071f; mat3d[1] = 0.975f; mat3d[5] = 0.024f; mat3d[15] = 1.0f;
+    ok = ok && !widescreen_ui_boxed(mat3d, sizeof mat3d);
+    ok = ok && !widescreen_ui_boxed(NULL, 560) && !widescreen_ui_boxed(pane, 64);
+
+    /* Link's Awakening (g_game_is_la == 1): widescreen_ui_boxed() stays off */
+    g_game_is_la = 1;
+    pane[19] = 780.0f; pane[23] = -360.0f;
+    pane[132] = 340.0f; pane[133] = 340.0f; pane[134] = -170.0f; pane[135] = 170.0f;
+    ok = ok && !widescreen_ui_boxed(pane, sizeof pane) && !widescreen_ui_boxed(text, sizeof text);
 
     return !ok;
 }
