@@ -169,8 +169,32 @@ uint64_t rt_pla_frame_dt_ns(uint32_t slot, uint64_t default_ns) {
 // Scarlet / Violet's SetSlotMode (sv_patches.py _sv_slot_mode): the 60 fps mode's duration (16.67 ms, table entry 0)
 // becomes the frame time measured this frame by the frame clock patch (rt_pla_frame_dt_ns) - every clock slot steps
 // by real time; other modes' durations stay as the table has them. LARECOMP_SV_SLOT_DT=0: the table's value.
+//
+// The table's 30 fps entry (1) is also read by the game's step factor, slot 1 / (table[mode] - 1) (0x7000b83d1c,
+// 0x7000d96428), with mode the game's own frame mode - still 1 (30 fps): _sv_frame_pace forces 60 fps in a register,
+// not in the game's copies. The factor is how many 30 fps frames a frame lasted, and the UI's animations (and
+// the Pokédex's book going onto the shelf on a new registration) advance by it. _sv_frame_pace sets entry 1 to
+// 16.67 ms in the 60 fps mode, so the factor was 1 at 60 fps: every UI animation played at double speed (the
+// map opened in 0.6 s instead of 1.2), and the book's insertion was cut short (its sequence counts in time, its
+// motion in frames). So entry 1 goes back to 33.3 ms here, once that patch has written it this frame
+// (SetSlotMode runs right after it, 0x7002b7a8f4): the factor is 0.5 at 60 fps, as the game's 30 fps timing
+// expects. A slot set to mode 1 gets the frame time measured, as one set to mode 0 does (the same as when entry
+// 1 was 16.67 ms). LARECOMP_SV_UI_STEP=0: entry 1 left at 16.67 ms (as before: UI animations at double speed).
+static bool sv_ui_step(void) {
+    static int on = -1;
+    if (on < 0) {
+        const char *e = ENV("LARECOMP_SV_UI_STEP");
+        on = !e || atoi(e) != 0;
+        LOG("[pace] Scarlet / Violet UI animations step by the 30 fps frame: %s\n", on ? "on" : "off (LARECOMP_SV_UI_STEP=0)");
+    }
+    return on;
+}
 uint64_t rt_sv_slot_duration(uint64_t table_ns) {
-    if (table_ns != 0x00fe502bull || !g_frame_dt_ns || !rt_pla_is_60fps() || !rt_sv_slot_dt()) return table_ns;
+    if (!g_frame_dt_ns || !rt_pla_is_60fps()) return table_ns;
+    bool ui = sv_ui_step();
+    if (ui) *(volatile uint64_t *)(uintptr_t)0x7003c2fbb0ull = 0x01fca056ull;  // (the table's entry 1: 33.3 ms)
+    if (!rt_sv_slot_dt()) return table_ns == 0x01fca056ull && ui ? 0x00fe502bull : table_ns;  // (nominal 1/60 s)
+    if (table_ns != 0x00fe502bull && !(ui && table_ns == 0x01fca056ull)) return table_ns;
     return g_frame_dt_ns;
 }
 
