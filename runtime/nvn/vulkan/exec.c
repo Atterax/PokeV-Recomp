@@ -8861,10 +8861,13 @@ static void ssgi_apply(TexBackend *tb) {
 // it, _STRENGTH (1), _DEBUG=1 (the reflection alone).
 static struct { bool pending; uint64_t frame; NvnTexture *target, *depth; TexBackend dsnap, csnap; } water;
 
+// Off in Scarlet / Violet for now, whatever F1 says: with the lighting pass recognized (gtao_is_lighting) the reflections
+// run there, and they don't look right on its water yet - they were made for Z-A's. LARECOMP_WATER=1 turns them on to
+// work on them; the setting (water_reflections) is kept in the ini, and the F1 row hidden (menu.mm), until then.
 static bool water_on(void) {
     static int env = -2;
-    if (env == -2) { const char *e = getenv("LARECOMP_WATER"); env = e ? atoi(e) != 0 : -1; }
-    return env >= 0 ? env : g_settings.water_ssr;
+    if (env == -2) { const char *e = getenv("LARECOMP_WATER"); env = e ? atoi(e) != 0 : 0; }
+    return env;
 }
 
 // A water surface: blended onto the lit image, writing depth, reading a depth texture

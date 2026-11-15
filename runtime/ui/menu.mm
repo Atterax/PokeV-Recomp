@@ -749,7 +749,8 @@ static void tab_display(bool in_game) {
                           "mesmo tempo da GPU em qualquer intensidade. Muda na hora.")))
             g_settings.ssgi_strength = gp[gpi];
     }
-    opt_toggle(TR("Water reflections", "Reflexos na água"), &g_settings.water_ssr, false,  // (vulkan/exec.c water_apply)
+    // (hidden while the reflections are off in Scarlet / Violet: vulkan/exec.c water_on)
+    if (0) opt_toggle(TR("Water reflections", "Reflexos na água"), &g_settings.water_ssr, false,  // (vulkan/exec.c water_apply)
                TR("Fountains, ponds and the sea mirror the buildings, characters and sky around them, with gentle "
                   "moving ripples; where the picture has nothing to mirror, the game's own sky reflection. Most visible "
                   "at low angles. Changes at once.",
