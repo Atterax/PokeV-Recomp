@@ -6,6 +6,7 @@
 
 #include "hle.h"
 #include "kernel.h"
+#include "settings.h"
 #ifdef _WIN32
 #include "platform/windows_threads.h"
 #endif
@@ -169,12 +170,31 @@ static void region_remove(uint64_t addr) {
 // beyond it fails with LimitReached - Pokémon Z-A maps all the free memory as one pool, then keeps asking for 4 MB
 // pieces until refused. Off by default (LARECOMP_PHYS_LIMIT=1): with the limit the game keeps fewer characters / props
 // loaded than on Ryujinx with its own (smaller) baseline - the 64 MB estimate is not what the hardware counts.
-#define APP_MEMORY 0xCD500000ull
+#define APP_MEMORY_HW 0xCD500000ull
+// Scarlet / Violet with more town people shown (settings npc_shown, hle/npc_shown.c): EXTRA more memory for the game's
+// GlobalHeap. The game sizes it 2920 MB + QueryMemoryInfo's programSize (the SDK: used - heap - stacks, taken once at
+// boot, f_7002b7da90) and maps the free memory (application - used) for it; how many town people may load their parts
+// from afar (manager +0xc58, f_70010358c8) is lowered as its headroom over 200 MB shrinks below ~108 MB, never raised.
+// With 64 shown a big city's models took it to ~2.68 of its 2.98 GB - past that line. Reported as application memory
+// + 2 x EXTRA with EXTRA counted as used: programSize, the GlobalHeap and the free memory mapped for it all grow by
+// EXTRA, whichever the game asks first. LARECOMP_EXTRA_MEMORY_MB=<n> overrides (0: none, at most 512). HEAP_MAX
+// (rt.h) leaves room for it.
+static uint64_t extra_memory(void) {
+    static int64_t v = -1;
+    if (v < 0) {
+        const char *e = getenv("LARECOMP_EXTRA_MEMORY_MB");
+        v = e ? (int64_t)atoll(e) << 20 : g_settings.npc_shown > 12 ? 512ll << 20 : 0;
+        if (v < 0 || v > (512ll << 20)) v = v < 0 ? 0 : 512ll << 20;
+        if (v) LOG("[kernel] %lld MB more memory for the game (people shown)\n", (long long)(v >> 20));
+    }
+    return (uint64_t)v;
+}
+#define APP_MEMORY (APP_MEMORY_HW + 2 * extra_memory())
 static uint64_t phys_mapped;
 static int phys_limit = -1;  // LARECOMP_PHYS_LIMIT=1: count physical memory as used and refuse mappings past APP_MEMORY
 static uint64_t used_memory(void) {
     if (phys_limit < 0) phys_limit = getenv("LARECOMP_PHYS_LIMIT") != NULL;
-    return heap_size + (phys_limit ? phys_mapped : 0) + 0x4000000ull;
+    return heap_size + (phys_limit ? phys_mapped : 0) + 0x4000000ull + extra_memory();
 }
 
 // bytes of [addr, addr + size) not mapped yet (physical memory regions)
@@ -962,7 +982,7 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         case 3: v = ALIAS_SIZE; break;
         case 4: v = HEAP_BASE; break;
         case 5: v = HEAP_MAX; break;
-        case 6: case 21: v = APP_MEMORY; break;  // application memory (3.2 GB, as on hardware)
+        case 6: case 21: v = APP_MEMORY; break;  // application memory (3.2 GB, as on hardware; + extra_memory)
         case 7: case 22: v = used_memory(); break;
         case 8: v = 0; break;
         case 9: v = 0; break;

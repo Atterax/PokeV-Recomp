@@ -131,6 +131,10 @@ bool rt_sv_slot_dt(void);
 // Supplies the real wall-clock frame duration in nanoseconds (clamped to [16.67 ms, 50.0 ms] when 60 FPS is on),
 // so the game runs at 1.0x normal speed at 60 FPS (no 2x speed-up) AND stays at 1.0x speed if FPS dips below 60.
 uint64_t rt_pla_frame_dt_ns(uint32_t slot, uint64_t default_ns) {
+    if (slot == 0) {  // (once a game frame, on the game's thread: Scarlet / Violet's people shown, npc_shown.c)
+        extern void rt_sv_npc_shown(void);
+        rt_sv_npc_shown();
+    }
     bool fps60 = rt_pla_is_60fps();
     uint64_t target_ns = fps60 ? 0x00fe502bull : (default_ns ? default_ns : 0x01fca056ull);
     static uint64_t last_ns;

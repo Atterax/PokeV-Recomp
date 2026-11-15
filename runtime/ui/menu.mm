@@ -756,6 +756,22 @@ static void tab_display(bool in_game) {
                   "Fontes, lagos e o mar refletem os prédios, personagens e o céu ao redor, com ondulações suaves; onde "
                   "a imagem não tem o que refletir, o reflexo do céu do próprio jogo. Mais visível em ângulos baixos. "
                   "Muda na hora."));
+    {   // town people with a model at once (hle/npc_shown.c: the character manager's limit, the game's 12)
+        static const int nv[] = {0, 24, 48, 64};
+        const char *ns[] = {TR("Game's (12)", "Do jogo (12)"), "24", "48", "64"};
+        int ni = 0;
+        for (int i = 0; i < 4; i++) if (nv[i] == g_settings.npc_shown) ni = i;
+        if (opt_choice(TR("People shown", "Pessoas visíveis"), &ni, ns, 4, 0,
+                       TR("How many of a town's people are shown at once. The game shows the 12 nearest and hides the "
+                          "rest, so a plaza's people pop in a few at a time as you walk up, and swap in and out in a "
+                          "crowd. More: the whole plaza from afar, at a little CPU and GPU time in big towns. Changes at "
+                          "once.",
+                          "Quantas pessoas de uma cidade aparecem de uma vez. O jogo mostra as 12 mais próximas e esconde "
+                          "o resto, então as pessoas de uma praça surgem aos poucos conforme você se aproxima, e trocam "
+                          "de lugar numa multidão. Mais: a praça inteira de longe, por um pouco de tempo da CPU e da GPU "
+                          "em cidades grandes. Muda na hora.")))
+            g_settings.npc_shown = nv[ni];
+    }
 #ifndef __APPLE__
     if (!la) {  // (runtime/nvn/vulkan/exec.c fsr2_copy: applies at once)
         int t = g_settings.taa ? 1 : 0;
