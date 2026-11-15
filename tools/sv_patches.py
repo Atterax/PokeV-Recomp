@@ -67,6 +67,46 @@ def _sv_frame_pace(gen, a):
             f'  /* {a:#x}: SV 3.0.1 60fps frame mode and delta-time */')
 
 
+def _sv_proj_half_fovy(gen, a):
+    # 0x7000cf1168 (branch 1) and 0x7000cf182c (branch 2) in f_7000cf0ef4: fmul s0, s0, s1 (half_fovy = fovy * 0.5).
+    # x19 is the camera: [+0x18c] fovy, [+0x190] aspect. Through rt_sv_proj_half_fovy (runtime/hle/widescreen.c),
+    # wider outputs (21:9, 32:9) keep half_fovy unchanged (Hor+); taller outputs widen it (Vert+).
+    want = {
+        a - 0x2c: 0xbd418e60,  # ldr s0, [x19, #0x18c]
+        a - 0x28: 0x1e2c1001,  # fmov s1, #0.5
+        a: 0x1e210800,         # fmul s0, s0, s1
+    }
+    for at, word in want.items():
+        w = struct.unpack_from('<I', gen.nso.image, at - gen.base)[0]
+        assert w == word, (hex(at), hex(w))
+    return ('{ extern float rt_sv_proj_half_fovy(float, float); float fovy_, half_s_, a_; '
+            'memcpy(&fovy_, &c->v[0], 4); memcpy(&half_s_, &c->v[1], 4); '
+            'memcpy(&a_, (const void *)(uintptr_t)(c->x[19] + 0x190), 4); '
+            'float h_ = rt_sv_proj_half_fovy(fovy_ * half_s_, a_); '
+            'c->v[0] = 0; memcpy(&c->v[0], &h_, 4); }'
+            f'  /* {a:#x}: fmul s0, s0, s1 (camera half_fovy) */')
+
+
+def _sv_proj_aspect(gen, a, vreg, want_word):
+    # ldr s<vreg>, [x19, #0x190] in f_7000cf0ef4: reads camera aspect for P00 = cot(fovy / 2) / aspect without
+    # mutating [x19 + 0x190] in guest memory (0x70032d7b20 dirty-checks that field).
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == want_word, (hex(a), hex(w))
+    return ('{ extern float rt_sv_proj_aspect(float); float a_; '
+            'memcpy(&a_, (const void *)(uintptr_t)(c->x[19] + 0x190), 4); '
+            'a_ = rt_sv_proj_aspect(a_); '
+            f'c->v[{vreg}] = 0; memcpy(&c->v[{vreg}], &a_, 4); }}'
+            f'  /* {a:#x}: ldr s{vreg}, [x19, #0x190] (camera aspect) */')
+
+
+def _sv_proj_aspect_s16(gen, a):
+    return _sv_proj_aspect(gen, a, 16, 0xbd419270)  # ldr s16, [x19, #0x190]
+
+
+def _sv_proj_aspect_s4(gen, a):
+    return _sv_proj_aspect(gen, a, 4, 0xbd419264)   # ldr s4, [x19, #0x190]
+
+
 def sv_patches(build):
     if build.lower() in SV_BUILDS:
         return {
@@ -75,5 +115,9 @@ def sv_patches(build):
             0x7002b7b310: _sv_slot_mode,
             0x7002b7b33c: _sv_slot_mode,
             0x700092dd28: _sv_slot_mode,
+            0x7000cf1168: _sv_proj_half_fovy,
+            0x7000cf11e8: _sv_proj_aspect_s16,
+            0x7000cf182c: _sv_proj_half_fovy,
+            0x7000cf18a4: _sv_proj_aspect_s4,
         }
     return {}

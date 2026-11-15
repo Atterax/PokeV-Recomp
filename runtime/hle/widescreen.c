@@ -16,6 +16,27 @@ static float g_wide = 1.0f;  // output aspect divided by 16:9 (1 = normal)
 void widescreen_set_factor(float f) { g_wide = f; }
 float widescreen_factor(void) { return g_wide; }
 
+// Pokémon Scarlet & Violet: its perspective cameras' half-fovy and aspect, read by the projection builder
+// (tools/sv_patches.py, 0x7000cf0ef4; the math: widescreen_proj.h). Every 16:9 camera follows the window's shape -
+// Hor+ on wider outputs (21:9, 32:9), Vert+ on taller outputs - so the picture fills the reshaped render targets
+// unstretched. The aspect field [cam+0x190] itself keeps the game's 16:9 (the game's dirty-check compares it).
+// LARECOMP_NO_WIDESCREEN=1 (or F1 > Aspect ratio > Original 16:9): g_wide stays 1, the game's own projection.
+#include "widescreen_proj.h"
+float rt_sv_proj_half_fovy(float half_fovy, float aspect) {
+    (void)widescreen_proj_aspect(aspect, g_wide, &half_fovy);
+    return half_fovy;
+}
+float rt_sv_proj_aspect(float aspect) {
+    float wide = g_wide, a = widescreen_proj_aspect(aspect, wide, NULL);
+    static float logged = 1.0f;  // (once per shape: the camera that took it)
+    if (a != aspect && wide != logged) {
+        logged = wide;
+        LOG("[widescreen] camera aspect %.4f -> %.4f (output %.3f x 16:9%s)\n", aspect, a, wide,
+            wide < 1.0f ? ", taller: vertical view widened" : "");
+    }
+    return a;
+}
+
 // Effects drawn as a mesh around the camera, sized to cover a 16:9 view: with the widened camera their outer edge
 // shows (Mysterious Woods fog ring: a hard-edged oval at 32:9, a stray cloud piece at the far left). Their draws
 // get a viewport widened by the widescreen factor (centred), so they cover the window as they cover 16:9.
@@ -150,6 +171,9 @@ static bool level_is_interior(void) {
 }
 
 bool widescreen_frame_boxed(uint64_t frame) {
+    // Another game (Pokémon Scarlet & Violet): Link's Awakening's game_in_play() is 0 here, which would box every
+    // frame into 16:9 with black sidebars. Its cameras follow the window (rt_sv_proj_aspect): the whole image.
+    if (!g_game_is_la) return false;
     static bool last;
     static uint64_t interior_until;  // keep boxing briefly after leaving: the first (dark) frames still show stale sides
     bool in = level_is_interior();
