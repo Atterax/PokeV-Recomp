@@ -772,6 +772,37 @@ static void tab_display(bool in_game) {
                           "em cidades grandes. Muda na hora.")))
             g_settings.npc_shown = nv[ni];
     }
+    {   // how far town people keep their detailed models (hle/npc_detail.c: "chara_model" LOD distances, 8 / 15 / 30 m)
+        static const int dv[] = {1, 2, 4, 6};
+        const char *ds[] = {TR("Game's (8 m)", "Do jogo (8 m)"), "16 m", "32 m", "48 m"};
+        int di = 0;
+        for (int i = 0; i < 4; i++) if (dv[i] == g_settings.npc_detail) di = i;
+        if (opt_choice(TR("People detail", "Detalhe das pessoas"), &di, ds, 4, 0,
+                       TR("How far away people keep their full-detail model. The game swaps them to simpler models "
+                          "past 8 m (and again past 15 and 30 m), so a person changes model twice as you walk up. "
+                          "Farther: faces, hair and clothes stay sharp across a plaza, at a little GPU time in crowded "
+                          "towns. Changes at once.",
+                          "A que distância as pessoas mantêm o modelo com todos os detalhes. O jogo troca para modelos "
+                          "mais simples a partir de 8 m (e de novo a 15 e 30 m), então uma pessoa muda de modelo duas "
+                          "vezes conforme você se aproxima. Mais longe: rostos, cabelos e roupas nítidos por toda a "
+                          "praça, por um pouco de tempo da GPU em cidades cheias. Muda na hora.")))
+            g_settings.npc_detail = dv[di];
+    }
+    {   // how far Pokémon keep their detailed models (hle/npc_detail.c: "pokemon" LOD distances, 10 / 20 / 30 m)
+        static const int pv[] = {1, 2, 4, 6};
+        const char *ps[] = {TR("Game's (10 m)", "Do jogo (10 m)"), "20 m", "40 m", "60 m"};
+        int pi = 0;
+        for (int i = 0; i < 4; i++) if (pv[i] == g_settings.pokemon_detail) pi = i;
+        if (opt_choice(TR("Pokémon detail", "Detalhe dos Pokémon"), &pi, ps, 4, 0,
+                       TR("How far away Pokémon keep their full-detail model. The game swaps them to simpler models "
+                          "past 10 m (and again past 20 and 30 m), so a Pokémon changes model as you walk up. Farther: "
+                          "they stay sharp across a field, at a little GPU time where many are around. Changes at once.",
+                          "A que distância os Pokémon mantêm o modelo com todos os detalhes. O jogo troca para modelos "
+                          "mais simples a partir de 10 m (e de novo a 20 e 30 m), então um Pokémon muda de modelo "
+                          "conforme você se aproxima. Mais longe: nítidos por todo o campo, por um pouco de tempo da "
+                          "GPU onde há muitos. Muda na hora.")))
+            g_settings.pokemon_detail = pv[pi];
+    }
 #ifndef __APPLE__
     if (!la) {  // (runtime/nvn/vulkan/exec.c fsr2_copy: applies at once)
         int t = g_settings.taa ? 1 : 0;
