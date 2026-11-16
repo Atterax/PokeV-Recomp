@@ -5320,12 +5320,40 @@ static uint32_t vc_pend[VC_TAB];  // entries the pending submission draws from (
 static int vc_npend;
 static uint32_t *vc_page_gen;  // per heap page: the generation of its last CPU write seen (vc_gen when observed)
 static uint32_t *vc_page_gpu;  // per heap page: the frame the GPU last wrote it (+1; 0: never)
+// Writes the OS loses. A write tracking query resets the pages' marks, and a store landing on a page while its mark is
+// reset (the game's thread rewriting its per-frame data with memcpy as the render thread asks) can go unrecorded: the
+// vertex cache kept its copy of the page from before, a frame's dynamic vertices stayed as they were, and Scarlet /
+// Violet's sandstorm, fog and the ground near them drew as huge stretched triangles - at random, as the race. A check
+// of every clean page's bytes against its copy (a scripted walk in a city) found such pages within seconds, nearly
+// all written 1-3 frames before. So a page seen written is unsettled for the next VC_RECENT frames, a lost store may
+// still be landing: whoever looks at it in that time (the vertex cache's copy, a texture upload check, the storage
+// watch) looks again after it settles - at the first look after the window, its generation then (vc_page_settle) is
+// what a look has to be newer than. (Counted from the look, not the clock: a range not drawn in those frames - an
+// object out of view for a moment - was copied before the window and served stale after it, a flickering triangle at
+// the academy's gate.)
+static uint32_t *vc_page_wfr;     // per heap page: the frame its last write was seen (+1; 0: never)
+static uint32_t *vc_page_settle;  // per heap page: the generation of the first look after its window (0: not yet)
+#define VC_RECENT 8u
+extern uint64_t vk_frame_counter(void);
+static uint32_t vc_gen = 1, vc_epoch = 1;  // (epoch: bumped when pages turn GPU-written: entries check again)
+static inline void vc_seen(uint64_t p, uint32_t g) {
+    vc_page_gen[p] = g;
+    vc_page_wfr[p] = (uint32_t)vk_frame_counter() + 1;
+    vc_page_settle[p] = 0;
+}
+// written since generation `since`, or maybe (a write seen, and `since` from before the page settled)?
+static inline bool vc_dirty(uint64_t p, uint32_t since) {
+    if (vc_page_gen[p] > since) return true;
+    if (!vc_page_wfr[p]) return false;
+    if ((uint32_t)vk_frame_counter() + 1 - vc_page_wfr[p] < VC_RECENT) return true;  // (still unsettled)
+    if (!vc_page_settle[p]) vc_page_settle[p] = vc_gen;
+    return since < vc_page_settle[p];
+}
 // A page the GPU hasn't written for this many frames is cached again (copied whole first): the game reuses its
 // memory, and pages a compute dispatch or transform feedback wrote once stayed read in place for the rest of the
 // session - the vertices read across PCIe grew to ~10 GB per 2 s after half an hour (GPU time +25%, 60 fps lost)
 #define VC_GPU_HOLD 120u
 static bool vc_gpu_expired;  // (an entry turned cacheable again: vc_flush orders its copy after the GPU's writes)
-static uint32_t vc_gen = 1, vc_epoch = 1;  // (epoch: bumped when pages turn GPU-written: entries check again)
 static uint64_t vc_bytes;
 #define VC_DEAD 1024
 static struct { VkBuffer b; VmaAllocation m; uint64_t seq; } vc_dead[VC_DEAD];
@@ -5365,6 +5393,8 @@ static bool pt_init(void) {
     if (!pt_state) { LOG("[vk] no page write tracking (%d, page %llu)\n", n, (unsigned long long)pg); return false; }
     vc_page_gen = calloc(HEAP_MAX / VC_PAGE, sizeof *vc_page_gen);
     vc_page_gpu = calloc(HEAP_MAX / VC_PAGE, sizeof *vc_page_gpu);
+    vc_page_wfr = calloc(HEAP_MAX / VC_PAGE, sizeof *vc_page_wfr);
+    vc_page_settle = calloc(HEAP_MAX / VC_PAGE, sizeof *vc_page_settle);
     vc_page_gen[0] = ++vc_gen;  // (the probe took page 0's tracking)
     return true;
 }
@@ -5420,13 +5450,13 @@ static int pages_written(uint64_t addr, uint64_t size, uint32_t since, uint32_t 
     int n = plat_written_pages(gwin_base + lo, hi - lo, pages, 4096, &pg);
     if (n < 0) return -1;
     uint32_t g = ++vc_gen;
-    if (n >= 4096) for (uint64_t p = lo / VC_PAGE; p < hi / VC_PAGE; p++) vc_page_gen[p] = g;
-    else for (int k = 0; k < n; k++) vc_page_gen[(pages[k] - gwin_base) / VC_PAGE] = g;
+    if (n >= 4096) for (uint64_t p = lo / VC_PAGE; p < hi / VC_PAGE; p++) vc_seen(p, g);
+    else for (int k = 0; k < n; k++) vc_seen((pages[k] - gwin_base) / VC_PAGE, g);
     *now = g;
     int changed = 0;
     for (uint64_t p = lo / VC_PAGE; p < hi / VC_PAGE; p++) {
         if (gpu_unknown && vc_page_gpu[p]) return -2;
-        if (vc_page_gen[p] > since) changed = 1;
+        if (vc_dirty(p, since)) changed = 1;
     }
     return changed;
 }
@@ -5542,8 +5572,8 @@ void vc_flush(void) {
         uint64_t pg = VC_PAGE;
         int n = plat_written_pages(gwin_base + lo, hi - lo, pages, 4096, &pg);
         prof_vc_queries++;
-        if (n < 0 || n >= 4096) for (uint64_t p = lo / VC_PAGE; p < hi / VC_PAGE; p++) vc_page_gen[p] = g;  // (all)
-        else for (int k = 0; k < n; k++) vc_page_gen[(pages[k] - gwin_base) / VC_PAGE] = g;
+        if (n < 0 || n >= 4096) for (uint64_t p = lo / VC_PAGE; p < hi / VC_PAGE; p++) vc_seen(p, g);  // (all)
+        else for (int k = 0; k < n; k++) vc_seen((pages[k] - gwin_base) / VC_PAGE, g);
         if (n > 0) prof_vc_scan_pages += (uint64_t)n;
         i = j;
     }
@@ -5555,7 +5585,7 @@ void vc_flush(void) {
         VkBufferCopy cp[64];
         int nc = 0;
         for (uint64_t p = e->lo / VC_PAGE; p < e->hi / VC_PAGE; p++) {
-            if (e->gen && vc_page_gen[p] <= e->gen) continue;
+            if (e->gen && !vc_dirty(p, e->gen)) continue;
             uint64_t o = p * VC_PAGE;
             if (nc && cp[nc - 1].srcOffset + cp[nc - 1].size == o) { cp[nc - 1].size += VC_PAGE; continue; }
             if (nc == 64) { nc = 1; cp[0] = (VkBufferCopy){e->lo, 0, e->hi - e->lo}; break; }  // (scattered: the whole range)
