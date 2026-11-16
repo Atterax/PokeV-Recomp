@@ -8771,20 +8771,41 @@ static NvnTexEntry *gtao_tex_entry(ShaderInfo *si, int i) {
 }
 
 // The deferred lighting pass, in any of its variants (the game swaps in others while a Pokémon is sent out, while a
-// move's effects play...): GTAO_LIGHTING, or a fragment shader with 10+ textures whose first two are one and the same
-// depth texture (the scene depth, read twice) and a camera in constant buffer 2. Decided once per shader.
+// move's effects play...): GTAO_LIGHTING, or a fragment shader with 10+ textures among whose first four one depth
+// texture is read twice - its depth and its stencil, the scene's - and a camera in constant buffer 2. Decided once per
+// shader, with the texture the depth is read through (gtao_depth_i: the last one sampled as a float). Pokémon Z-A reads
+// it as its textures 0 and 1 (depth both times); Scarlet / Violet as 0 (the stencil, an unsigned sampler: bit 6, the
+// pixels the lighting skips) and 2 (the depth, 74421cd200) - the check for 0 and 1 alone never matched there, so F1 >
+// Ambient occlusion, Indirect light and Water reflections did nothing. The camera rows are the same in both
+// (cb5[12..15] the inverse view-projection, cb5[19] the camera's position).
+static int gtao_depth_i = 1;  // (the last lighting variant matched: its depth texture's index)
 static bool gtao_is_lighting(Prog *pr) {
-    if (g_cur_fs_hash == GTAO_LIGHTING) return true;
+    if (g_cur_fs_hash == GTAO_LIGHTING) return gtao_depth_i = 1, true;
     if (!(gtao_on() || ssgi_on() || water_on()) || !pr || !pr->fi || pr->fi->ntex < 10 || !st.program) return false;
-    static uint64_t known[64]; static bool verdict[64]; static int nk;
+    static uint64_t known[64]; static int8_t verdict[64]; static int nk;  // (verdict: the depth's index, -1 = not lighting)
     uint64_t fs = st.program->stages[1].code_addr;
-    for (int i = 0; i < nk; i++) if (known[i] == fs) return verdict[i];
-    NvnTexEntry *a = gtao_tex_entry(pr->fi, 0), *b = gtao_tex_entry(pr->fi, 1);
-    bool v = a && b && a->tex == b->tex && renderer_format_is_depth(a->tex->format) && a->tex->backend &&
-             ((TexBackend *)a->tex->backend)->scalable && st.ubuf[1][2].addr && st.ubuf[1][2].size >= 22 * 16;
-    if (nk < 64) { known[nk] = fs; verdict[nk++] = v; }
-    if (v) LOG("[gtao] lighting variant fs %016llx (%d textures)\n", (unsigned long long)g_cur_fs_hash, pr->fi->ntex);
-    return v;
+    for (int i = 0; i < nk; i++)
+        if (known[i] == fs) return verdict[i] >= 0 ? (gtao_depth_i = verdict[i], true) : false;
+    int d = -1;
+    if (st.ubuf[1][2].addr && st.ubuf[1][2].size >= 22 * 16) {
+        NvnTexEntry *e[4];
+        for (int i = 0; i < 4; i++) e[i] = gtao_tex_entry(pr->fi, i);
+        for (int i = 0; i < 4; i++) {
+            if (!e[i] || !renderer_format_is_depth(e[i]->tex->format) || !e[i]->tex->backend ||
+                !((TexBackend *)e[i]->tex->backend)->scalable || pr->fi->tex[i].type != TEXTYPE_2D)
+                continue;
+            bool twice = false;
+            for (int k = 0; k < 4; k++) twice |= k != i && e[k] && e[k]->tex == e[i]->tex;
+            // (the float read: of Z-A's two depth reads the second, texture 1, as before; Violet's other read is the
+            // stencil's, an unsigned sampler)
+            if (twice && !pr->fi->tex[i].stencil) d = i;
+        }
+    }
+    if (nk < 64) { known[nk] = fs; verdict[nk++] = (int8_t)d; }
+    if (d >= 0) LOG("[gtao] lighting variant fs %016llx (%d textures, the depth as texture %d)\n", (unsigned long long)g_cur_fs_hash,
+                    pr->fi->ntex, d);
+    if (d >= 0) gtao_depth_i = d;
+    return d >= 0;
 }
 
 // Before the frame's first lighting draw (outside any pass): GTAO and its filter into post images 6 / 7.
@@ -8793,14 +8814,14 @@ static void gtao_before_lighting(Prog *pr) {
     uint64_t frame = renderer_exec_frame();
     if (!(gtao_on() || ssgi_on() || water_on()) || gtao.frame == frame + 1 || frame < (uint64_t)gtao_env("LARECOMP_GTAO_FROM", 0)) return;  // (_FROM: on from that frame - A/B tests)
     gtao.frame = frame + 1;
-    NvnTexEntry *de = gtao_tex_entry(pr->fi, 1);
+    NvnTexEntry *de = gtao_tex_entry(pr->fi, gtao_depth_i);
     const Range *cam = &st.ubuf[1][2];
     if (!de || !renderer_format_is_depth(de->tex->format) || !cam->addr || cam->size < 22 * 16) {
         static int nlog;
         if (nlog++ < 3) LOG("[gtao] lighting draw without the depth / camera it expects: skipped\n");
         return;
     }
-    VkImageView dv = vk_view(de->tex, &de->view, de->has_view, false, pr->fi->tex[1].type);
+    VkImageView dv = vk_view(de->tex, &de->view, de->has_view, false, pr->fi->tex[gtao_depth_i].type);
     TexBackend *db = de->tex->backend;
     if (!dv || !db) return;
     const float *c = (const float *)(uintptr_t)cam->addr;
@@ -8923,10 +8944,13 @@ static void ssgi_apply(TexBackend *tb) {
 // it, _STRENGTH (1), _DEBUG=1 (the reflection alone).
 static struct { bool pending; uint64_t frame; NvnTexture *target, *depth; TexBackend dsnap, csnap; } water;
 
+// Off in Scarlet / Violet for now, whatever F1 says: with the lighting pass recognized (gtao_is_lighting) the reflections
+// run there, and they don't look right on its water yet - they were made for Z-A's. LARECOMP_WATER=1 turns them on to
+// work on them; the setting (water_reflections) is kept in the ini, and the F1 row hidden (menu.mm), until then.
 static bool water_on(void) {
     static int env = -2;
-    if (env == -2) { const char *e = getenv("LARECOMP_WATER"); env = e ? atoi(e) != 0 : -1; }
-    return env >= 0 ? env : g_settings.water_ssr;
+    if (env == -2) { const char *e = getenv("LARECOMP_WATER"); env = e ? atoi(e) != 0 : 0; }
+    return env;
 }
 
 // A water surface: blended onto the lit image, writing depth, reading a depth texture
