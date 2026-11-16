@@ -216,14 +216,32 @@ static void recompute_pad(void) {
         if (h >= 0 && h < PADB_HOST_COUNT && (host >> h & 1)) b |= 1ull << i;
     }
     pad_buttons = b;
-    int32_t rx, ry;
-    if (!pad || host_test) pad_lx = test_lx, pad_ly = test_ly, rx = test_rx, ry = test_ry;
+    int32_t lx, ly, rx, ry;
+    if (!pad || host_test) lx = test_lx, ly = test_ly, rx = test_rx, ry = test_ry;
     else {
-        pad_lx = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTX);
-        pad_ly = -SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTY);
+        lx = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTX);
+        ly = -SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTY);
         rx = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHTX);
         ry = -SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHTY);
     }
+    // stick_deadzone: the Switch's hid hands games sticks that read 0 at rest, and Scarlet / Violet trusts that. A
+    // controller's stick at rest never reads exactly 0 here (SDL gives the raw value: a few hundred, a few thousand on
+    // a worn pad), and the map's magnifier crept on by itself and wouldn't settle on a fast-travel point. Within this
+    // radius (percent of full tilt) both sticks read 0; past it the rest of the travel is stretched over the whole
+    // range, so a light push still moves slowly and full tilt still reaches full. Keyboard and scripted sticks don't
+    // drift and aren't touched.
+    float dzp = g_settings.stick_deadzone;
+    if (dzp > 0) {
+        double dz = 32767.0 * dzp / 100;
+        int32_t *const st[2][2] = {{&lx, &ly}, {&rx, &ry}};
+        for (int k = 0; k < 2; k++) {
+            int32_t x = *st[k][0], y = *st[k][1];
+            double m = sqrt((double)x * x + (double)y * y);
+            double f = m <= dz ? 0 : m >= 32767 ? 32767 / m : (m - dz) / (32767 - dz) * 32767 / m;
+            *st[k][0] = (int32_t)lround(x * f), *st[k][1] = (int32_t)lround(y * f);
+        }
+    }
+    pad_lx = lx, pad_ly = ly;
     // rstick_snap: a stick pushed sideways also reads a little up or down (an Xbox One pad: 4 degrees on average, up
     // to 12), and the camera tilts with it. That close to an axis the stick is put on the axis; the angles in between
     // are spread over the rest, so nothing jumps at the edge. The length is kept.
