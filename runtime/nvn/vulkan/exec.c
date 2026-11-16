@@ -1547,7 +1547,7 @@ static void vk_end_pass_at(int line) {
     if (prof && line < 4096) prof_end_line[line]++;
     rec_CmdEndRendering(vk_cmd());
     in_pass = false;
-    if (g_debug_frame && st.rt.ncolor && st.rt.color[0] && st.rt.color[0]->backend) {
+    if (g_debug_frame && !ENV("LARECOMP_DEBUG_NOPNG") && st.rt.ncolor && st.rt.color[0] && st.rt.color[0]->backend) {
         char path[256];
         static uint64_t debug_pass_frame = ~0ull;
         static int multi = -1;
@@ -6766,6 +6766,15 @@ static bool wait_built(_Atomic int *state, const CmdRec *r, bool indexed, bool p
     }
     return atomic_load(state) == 1;
 }
+// A draw into a reshaped (wider / taller than 16:9) pass at the uniform scale, centred: UI keeps its 16:9 layout.
+static void vp_box_16_9(void) {
+    int pw, ph;
+    pass_size(&pw, &ph);
+    float u = fminf(pass_sx, pass_sy);
+    vp_sx = vp_sy = u;
+    vp_ox = (pw - st.rt.color[0]->width * u) * 0.5f;
+    vp_oy = (ph - st.rt.color[0]->height * u) * 0.5f;
+}
 static void draw(CmdRec *r, bool indexed) {
     PROF_T0();
     if (xfb_on) {
@@ -7180,13 +7189,20 @@ static void draw_(CmdRec *r, bool indexed) {
         }
         bool composite = reads_scene || fade_fill || (fullscreen_fill && wide_frame == renderer_exec_frame());
         if (!composite) wide_frame = ~0ull;
-        if (!composite) {
-            int pw, ph;
-            pass_size(&pw, &ph);
-            float u = fminf(pass_sx, pass_sy);
-            vp_sx = vp_sy = u;
-            vp_ox = (pw - st.rt.color[0]->width * u) * 0.5f;
-            vp_oy = (ph - st.rt.color[0]->height * u) * 0.5f;
+        if (!composite) vp_box_16_9();
+    } else if (fabsf(pass_sx - pass_sy) > 0.01f * pass_sy && st.rt.ncolor && st.ubuf[0][0].addr) {
+        // HUD layout panes and font text drawn into a reshaped intermediate composite target: centred 16:9 box.
+        extern bool widescreen_ui_boxed_draw(const float *u, uint64_t size, int ntex,
+                                             const float (*tex_sc)[2], const uint32_t (*tex_wh)[2]);
+        const float *u = (const float *)(uintptr_t)st.ubuf[0][0].addr;
+        int ntex = pr->fi->ntex < 64 ? pr->fi->ntex : 64;
+        bool boxed = widescreen_ui_boxed_draw(u, st.ubuf[0][0].size, ntex, tex_sc[1], tex_wh[1]);
+        if (boxed) vp_box_16_9();
+        if (g_debug_frame && (st.ubuf[0][0].size == 128 || st.ubuf[0][0].size == 560)) {
+            LOG("[draw]   ui %s %s: proj %g %g %g %g / %g %g %g %g", st.ubuf[0][0].size == 560 ? "pane" : "text",
+                boxed ? "boxed" : "not boxed", u[0], u[3], u[5], u[7], u[12], u[13], u[14], u[15]);
+            if (st.ubuf[0][0].size == 560) LOG(", rect %g %g %g %g", u[132], u[133], u[134], u[135]);
+            LOG("\n");
         }
     }
     {   // camera-attached effects sized for 16:9 are widened with the view (runtime/hle/widescreen.c)

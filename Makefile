@@ -245,6 +245,7 @@ EXEFS ?= extracted/exefs
 gen:
 	cd tools && ../$(PY) gen.py sdk ../$(EXEFS)/sdk 0x7008000000 ../$(GEN)/sdk --hle ../runtime/hle/hle_symbols.txt $(GENSIMD)
 	cd tools && ../$(PY) gen.py main ../$(EXEFS)/main 0x7000000000 ../$(GEN)/main $(GENSIMD)
+	@if [ -f $(EXEFS)/subsdk0 ]; then cd tools && ../$(PY) gen.py subsdk0 ../$(EXEFS)/subsdk0 0x700a000000 ../$(GEN)/subsdk0 --hle ../runtime/hle/hle_symbols.txt $(GENSIMD); fi
 
 gen-objs: $(GEN_OBJ)
 
