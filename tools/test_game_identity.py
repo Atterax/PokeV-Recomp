@@ -28,8 +28,7 @@ header = (ROOT / 'runtime/game_identity.h').read_text()
 m = re.search(r'\{\{([^}]*)\}, "Pok\\xc3\\xa9mon Violet", "4\.0\.0", true\}', header)
 assert m, 'Violet 4.0.0 entry not found in game_identity.h'
 violet = ''.join(b.strip()[2:] for b in m.group(1).split(','))
-# (SV_BUILDS still labels it 3.0.1, its name before issue #3: the build id is what must agree)
-assert f"'{violet}': " in sv, f'{violet} is not in tools/sv_patches.py SV_BUILDS'
+assert f"'{violet}': '4.0.0'" in sv, f'{violet} is not tools/sv_patches.py SV_BUILDS\'s Violet 4.0.0'
 
 # The start screen and main.c take the answer from the header: no build table of their own that could let another
 # game's files through again (v0.0.24's launcher accepted Arceus 1.1.1, Z-A and Link's Awakening)

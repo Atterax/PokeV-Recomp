@@ -1,8 +1,8 @@
 // Which game a set of game files is, from its exefs/main build ID (the NSO header's first 8 bytes at 0x40), and
 // whether PokeV-Recomp runs it. Header-only (C and C++: runtime/ui/launcher.mm, runtime/main.c, tools/test_game_identity.c).
 //
-// Only Pokémon Violet 4.0.0 is accepted (tools/sv_patches.py SV_BUILDS, which still calls it 3.0.1: until v0.0.27
-// the project took update v786432 for 3.0.1 - its control.nacp says 4.0.0, issue #3). The other builds below are the
+// Only Pokémon Violet 4.0.0 is accepted (tools/sv_patches.py SV_BUILDS; until v0.0.27 the project took update
+// v786432 for 3.0.1 - its control.nacp says 4.0.0, issue #3). The other builds below are the
 // ones this runtime's ancestors (LAS Recomp, ZA Recomp, PokeL-ARecomp) set up: they are *recognised*, never accepted,
 // so the start screen can say "these are Pokémon Legends: Arceus's files" instead of offering to compile them. Before
 // v0.0.25 the start screen accepted all of them, and on Linux its data folder was PokeL-ARecomp's

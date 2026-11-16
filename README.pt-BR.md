@@ -26,8 +26,14 @@
 > [PokeL-ARecomp](https://github.com/fabioschmidt01/PokeL-ARecomp).
 
 > [!NOTE]
-> **Últimas atualizações (v0.0.23 a v0.0.27): grandes melhorias de desempenho e estabilidade, e várias correções de
+> **Últimas atualizações (v0.0.23 a v0.0.28): grandes melhorias de desempenho e estabilidade, e várias correções de
 > bugs.**
+> - **v0.0.28, 12 pull requests da comunidade:** crash ao entrar em cidades corrigido, sem triângulos pretos /
+>   esticados perto dos NPCs e na tempestade de areia e neblina, NPCs com sobrancelhas de perto, céu sem faixas,
+>   animações da interface na velocidade certa a 60 fps, oclusão ambiente e luz indireta funcionando, zona morta dos
+>   analógicos (lupa do mapa / viagem rápida), NVIDIA DLAA, ultrawide 32:9 e opções no F1 de quantas pessoas aparecem
+>   e até onde os modelos mantêm o detalhe máximo (por [Atterax](https://github.com/Atterax) e
+>   [didslima](https://github.com/didslima), #5 a #16).
 > - **O cabelo não brilha mais em roxo / ciano** (achado e corrigido por [Atterax](https://github.com/Atterax),
 >   [#4](../../pull/4)). Ainda faltam algumas salvaguardas nessa correção.
 > - **Velocidade normal abaixo de 60 fps**: acabou a câmera lenta a 40-50 fps.
@@ -162,10 +168,16 @@ Obrigado a todos que relataram problemas e enviaram correções: sem eles esses 
 - **[Atterax](https://github.com/Atterax)**: achou e corrigiu o cabelo roxo / ciano - o tradutor de shaders ignorava o
   código de condição dos desvios, e a iluminação seguia o caminho errado no cabelo ([#4](../../pull/4)); avisou que a
   atualização suportada é a 4.0.0 do jogo, não a 3.0.1 ([#3](../../issues/3)); criou o `LARECOMP_CLOCK` para testes
-  repetíveis.
+  repetíveis. Na v0.0.28: sobrancelhas / cílios dos NPCs ([#5](../../pull/5)), zona morta dos analógicos
+  ([#6](../../pull/6)), céu com faixas ([#7](../../pull/7)), crash ao entrar numa cidade ([#8](../../pull/8)),
+  triângulos esticados na tempestade / neblina ([#9](../../pull/9)), triângulos pretos seguindo NPCs
+  ([#10](../../pull/10)), animações da interface a 60 fps ([#11](../../pull/11)), NVIDIA DLAA ([#12](../../pull/12)),
+  oclusão ambiente e luz indireta ([#13](../../pull/13)), F1 > Pessoas exibidas ([#15](../../pull/15)) e detalhe de
+  pessoas / Pokémon ([#16](../../pull/16)).
 - **[didslima](https://github.com/didslima)**: testou o AppImage no Bazzite, relatou que ele usava a pasta de dados do
   Legends: Arceus ([#1](../../issues/1)) e corrigiu: pasta de dados própria do PokeV-Recomp, só arquivos do Pokémon
-  Violet aceitos, nomes do PokeV-Recomp no AppImage, com testes ([#2](../../pull/2)).
+  Violet aceitos, nomes do PokeV-Recomp no AppImage, com testes ([#2](../../pull/2)). Na v0.0.28: suporte a
+  ultrawide 32:9 - câmera Hor+ e HUD, menus e arte da tela de título mantidos em 16:9 ([#14](../../pull/14)).
 
 Relatos e pull requests são bem-vindos: veja o [CONTRIBUTING.md](CONTRIBUTING.md).
 

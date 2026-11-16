@@ -997,4 +997,24 @@ listras por triângulo em tudo que é iluminado. Céu, HUD e minimapa não passa
 
 ---
 
+## 35. Doze Pull Requests da Comunidade (v0.0.28)
+
+Aceitas de uma vez (todas com descrição, testes e indicação de recompilação):
+- **Atterax:** #5 sobrancelhas / cílios dos NPCs de perto (o espelho de transform feedback pula buffers que o programa
+  não usa); #6 zona morta dos analógicos (lupa do mapa andando sozinha, viagem rápida inalcançável); #7 céu com faixas
+  (profundidade de bloco das texturas 3D empacotadas); #8 crash ao entrar numa cidade (memória de comandos no ritmo do
+  hardware); #9 triângulos esticados na tempestade de areia / neblina (cache de vértices revisita páginas com escrita
+  perdida); #10 triângulos pretos seguindo NPCs (o espelho de transform feedback só serve bytes escritos neste quadro);
+  #11 animações da interface em dobro a 60 fps (`LARECOMP_SV_UI_STEP=0` desliga); #12 NVIDIA DLAA no F1 > Vídeo
+  (RTX + `nvngx_dlss.dll`); #13 oclusão ambiente e luz indireta funcionando (reflexos na água desligados até serem
+  corrigidos); #15 F1 > Pessoas exibidas e NPCs parados piscando depois de algumas cidades; #16 F1 > Detalhe de pessoas
+  / de Pokémon.
+- **didslima:** #14 ultrawide 32:9 (câmera Hor+ por `tools/sv_patches.py`, HUD / menus / arte da tela de título em
+  16:9), com 1.297 testes.
+- `tools/sv_patches.py`: o rótulo do build passa a ser 4.0.0 (issue #3), junto com os patches novos da #14.
+- **O jogo recompila uma vez** (10-30 min): a #14 muda o gerador. Versão **`v0.0.28`**.
+- Pendente: as salvaguardas da correção do cabelo (seção 34).
+
+---
+
 *Documento mantido em sincronia contínua pelo assistente de IA Antigravity (Google DeepMind).*

@@ -4,7 +4,7 @@ import struct
 
 # main's build ID (first 16 hex digits) -> version
 SV_BUILDS = {
-    '709bfd6611529864': '3.0.1',  # Pokémon Violet v786432 (3.0.1)
+    '709bfd6611529864': '4.0.0',  # Pokémon Violet v786432 (4.0.0; called 3.0.1 here until v0.0.28, issue #3)
 }
 
 
@@ -32,7 +32,7 @@ def _sv_frame_clock(gen, a):
             'uint64_t dt_ns = rt_pla_frame_dt_ns(0, orig_ns); '
             'if (c->x[0] && dt_ns != orig_ns && rt_sv_slot_dt()) { ST64(c->x[0] + 8, dt_ns); ST64(c->x[0] + 0x18, dt_ns); } '
             'c->v[0] = dt_ns; }'
-            f'  /* {a:#x}: SV 3.0.1 dynamic frame clock delta-time (ns), into clock slots 0 and 1 */')
+            f'  /* {a:#x}: SV 4.0.0 dynamic frame clock delta-time (ns), into clock slots 0 and 1 */')
 
 
 def _sv_slot_mode(gen, a):
@@ -47,12 +47,12 @@ def _sv_slot_mode(gen, a):
     assert w == 0xf862d902, hex(w)  # ldr x2, [x8, w2, sxtw #3]
     return ('{ extern uint64_t rt_sv_slot_duration(uint64_t table_ns); '
             'c->x[2] = rt_sv_slot_duration(LD64(c->x[8] + ((int64_t)(int32_t)c->x[2] << 3))); }'
-            f'  /* {a:#x}: SV 3.0.1 clock slot duration: the real frame time in the 60 fps mode */')
+            f'  /* {a:#x}: SV 4.0.0 clock slot duration: the real frame time in the 60 fps mode */')
 
 
 def _sv_frame_pace(gen, a):
     # 0x7002b7a858: ldrsb w20, [x10, #0x20]
-    # In Pokémon Scarlet & Violet 3.0.1, [x10 + 0x20] is the game's target frame mode (1 for 30 FPS, 0 for 60 FPS).
+    # In Pokémon Scarlet & Violet 4.0.0, [x10 + 0x20] is the game's target frame mode (1 for 30 FPS, 0 for 60 FPS).
     # Setting w20 = 0 when 60fps is enabled causes:
     # 1. Present interval at 0x7002b7a874 (w20 + 1) to become 1 (60 FPS vsync presentation).
     # 2. Clock slots 0..3 to be set to mode 0 (16.666667 ms = 1/60s), eliminating 2x fast-forward speed-up!
@@ -64,7 +64,7 @@ def _sv_frame_pace(gen, a):
             'int8_t orig_mode = c->x[10] ? *(int8_t *)(c->x[10] + 0x20) : 1; '
             'c->x[20] = fps60 ? 0 : orig_mode; '
             '*(uint64_t *)0x7003c2fbb0ull = fps60 ? 0x00fe502bull : 0x01fca056ull; }'
-            f'  /* {a:#x}: SV 3.0.1 60fps frame mode and delta-time */')
+            f'  /* {a:#x}: SV 4.0.0 60fps frame mode and delta-time */')
 
 
 def _sv_proj_half_fovy(gen, a):
