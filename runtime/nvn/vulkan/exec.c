@@ -21,6 +21,7 @@
 #include "vk.h"
 #include "record.h"
 #include "vk_fsr2.h"
+#include "vk_dlaa.h"
 #include "vk_xess.h"
 #include "../renderer.h"
 #include "../pace.h"
@@ -3296,7 +3297,8 @@ static uint32_t fsr2_scene_w, fsr2_scene_h;  // (the scene depth's size: mv_note
 static bool fsr2_wanted(void) {  // (F1 > Video > Temporal anti-aliasing; LARECOMP_FSR2=0 / 1 overrides it)
     static int env = -2;
     if (env == -2) env = ENV("LARECOMP_FSR2") ? atoi(ENV("LARECOMP_FSR2")) != 0 : -1;
-    return env >= 0 ? env : g_settings.taa;
+    // (DLAA when it came up at the start; chosen but not up - a change waiting for the restart, no RTX GPU: the game's)
+    return env >= 0 ? env : g_settings.taa == TAA_FSR2 || (g_settings.taa == TAA_DLAA && vk_dlaa_available());
 }
 static void fsr2_frame_jitter(void) {
     extern uint64_t vk_frame_counter(void);
@@ -8424,10 +8426,14 @@ static bool fsr2_copy(Prog *pr) {
     uint64_t f = vk_frame_counter();
     NvnTexture *dst = st.rt.color[0];
     TexBackend *db = dst ? dst->backend : NULL;
+    // (once a frame: this frame's scene is resolved already. ZA Recomp #175: a menu's full-screen background drawn
+    // unblended into the shown image afterwards, from a mipmapped picture, went through FSR as a second "copy" and
+    // showed as a mosaic of mip 0's stale squares. A copy's source has one level)
+    if (fsr2_ok_frame == f) return false;
     if (!db || st.color_state[0] || !db->presented || mv_frame[0] != f || !mv_depth || !mv_depth->backend) return false;
     NvnTexture *src = frag_tex(pr, 0);
     TexBackend *sb = src ? src->backend : NULL, *zb = mv_depth->backend;
-    if (!sb || !sb->image || src == dst || sb->width != db->width || sb->height != db->height || sb->width != zb->width ||
+    if (!sb || !sb->image || src == dst || sb->levels > 1 || sb->width != db->width || sb->height != db->height || sb->width != zb->width ||
         sb->height != zb->height || (sb->aspect & ~VK_IMAGE_ASPECT_COLOR_BIT))
         return false;
     if (sb->scalable && (sb->ax != sb->sx || sb->ay != sb->sy)) return false;  // (Dynamic: the picture in part of the image)
@@ -8547,7 +8553,8 @@ static bool fsr2_copy(Prog *pr) {
                       .w = w, .h = h, .ow = w, .oh = h, .jx = fsr2_jx, .jy = fsr2_jy, .dt_ms = fminf(fmaxf(dt, 1), 100),
                       .near_z = m[14] > 0 ? m[14] : 0.1f, .fov_y = p11 > 0 ? 2 * atanf(1 / p11) : 1.0f, .sharpness = 0, .reset = reset};
     VkCommandBuffer sec = fsr2_cmd();
-    bool ok = vk_fsr2_record(g_vk.phys, g_vk.dev, sec, &fr);
+    bool dlaa = g_settings.taa == TAA_DLAA && vk_dlaa_available();  // (NVIDIA DLAA: the same inputs - dlaa.c)
+    bool ok = dlaa ? vk_dlaa_record(g_vk.dev, sec, &fr) : vk_fsr2_record(g_vk.phys, g_vk.dev, sec, &fr);
     VK_CHECK(vkEndCommandBuffer(sec));
     if (!ok) return false;
     // (the shown image's first pass this frame is now the HUD's: a target's first pass in a frame clears it -
@@ -8570,7 +8577,8 @@ static bool fsr2_copy(Prog *pr) {
         }
     }
     static int nlog;
-    if (nlog++ < 3) LOG("[fsr2] frame %llu: %ux%u, jitter %.3f %.3f%s\n", (unsigned long long)f, w, h, fsr2_jx, fsr2_jy, reset ? ", reset" : "");
+    if (nlog++ < 3) LOG("[%s] frame %llu: %ux%u, jitter %.3f %.3f%s\n", dlaa ? "dlaa" : "fsr2", (unsigned long long)f, w, h, fsr2_jx,
+                        fsr2_jy, reset ? ", reset" : "");
     fsr2_ok_frame = f;
     return true;
 }
