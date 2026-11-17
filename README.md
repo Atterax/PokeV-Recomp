@@ -2,6 +2,8 @@
 
 <img src="docs/icon/icon_1024.png" alt="PokeV-Recomp icon" width="140">
 
+<a href="https://recomplauncher.com/game/pokev-recomp"><img src="https://recomplauncher.com/assets/press/launcher/badge-dark.svg" alt="Get it on RecompLauncher" height="56"></a>
+
 # PokeV-Recomp (SV Recomp)
 
 **A native PC port of *Pokémon Violet*, built by static recompilation. Work in progress.**
