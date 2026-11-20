@@ -5046,11 +5046,11 @@ static VkDescriptorBufferInfo gfast_info(void) {
 // heap's import (host memory), every vertex was a scattered write across PCIe: 3 ms of GPU time a frame (7 with
 // mods/MaxLOD). Instead the sessions write a device-local mirror of the arena (XFB_BUFFER_INDEX), the vertex streams
 // inside parts written that way read it (guest_direct), and at each session's end the parts written are copied back
-// to the heap (one small DMA transfer), for anything else that reads them there. Ranges outside the mirror's 64 MB
-// window go to the heap as before. LARECOMP_VK_XFB_MIRROR=0: off, =1: on. Off by default on AMD GPUs (#22: an RX 9070 XT
+// to the heap (one small DMA transfer), for anything else that reads them there. Ranges outside the mirror's window
+// (xm_place) go to the heap as before. LARECOMP_VK_XFB_MIRROR=0: off, =1: on. Off by default on AMD GPUs (#22: an RX 9070 XT
 // lost the device on an invalid GPU read in exactly these skinning draws, with robust access on and submissions made
 // one at a time) - their transform feedback goes to the heap's import as before the mirror.
-#define XM_SIZE (64ull << 20)
+#define XM_SIZE (256ull << 20)  // (xm_place: 64 MB until 2026-11; a town's arena can come in two parts 140 MB apart)
 #define XM_CHUNK 256ull
 static VkBuffer xm_buf;
 static VmaAllocation xm_mem;
@@ -5107,10 +5107,83 @@ static bool xm_buffer_used(int b) {
     return !ctl || *(const uint32_t *)(ctl + 0x4DC + 0x80 * b) != 0;
 }
 
+// The mirror's place. It was put once, around the first session's buffers - but where the game's skinning arena lies
+// varies from one start to the next, and the first session can come from somewhere else (one during the load into the
+// field, 70-130 MB past the town's arena): then ~90 % of a town's sessions fell outside the window and wrote the heap's
+// import across PCIe as before the mirror - 10-19 ms more GPU time a frame (Mesagoza at World detail 4x: 25-29 fps
+// against 30-33, one start in two). And on such a start the arena itself comes in two parts ~140 MB apart, more than
+// the 64 MB window was. Now the window is 256 MB, each frame's sessions are counted by the 8 MB piece of the address
+// space their buffers are in, and when 16 or more of a frame's fell outside, the window moves to where it covers
+// the most of them, if that's 16 more (between frames, with nothing waiting to be copied back: only chunks written in the frame being
+// drawn are ever read from the mirror, so what the old place held is simply never read again). LARECOMP_VK_XM_MOVE=0:
+// placed once, as before; LARECOMP_LOG_XM=1: the counts every 300 frames.
+#define XM_PIECES 32
+#define XM_PIECE_SHIFT 23
+static struct { uint64_t piece, n; } xm_tab[XM_PIECES];
+static uint64_t xm_in_n, xm_out_n, xm_frame, xm_moved_at;
+static void xm_place(void) {
+    static int on = -1;
+    if (on < 0) on = !ENV("LARECOMP_VK_XM_MOVE") || atoi(ENV("LARECOMP_VK_XM_MOVE")) != 0;
+    if (!on || !xm_on()) return;
+    uint64_t f = vk_frame_counter();
+    if (f != xm_frame) {  // (the frame before)
+        static int dlog = -1;
+        if (dlog < 0) dlog = ENV("LARECOMP_LOG_XM") != NULL;
+        if (dlog && f % 300 == 0) {
+            LOG("[xm] frame %llu: %llu sessions in the window at %llx, %llu outside; by 8 MB piece:", (unsigned long long)f,
+                (unsigned long long)xm_in_n, (unsigned long long)xm_lo, (unsigned long long)xm_out_n);
+            for (int i = 0; i < XM_PIECES && xm_tab[i].n; i++)
+                LOG(" %llx %llu", (unsigned long long)(xm_tab[i].piece << XM_PIECE_SHIFT), (unsigned long long)xm_tab[i].n);
+            LOG("\n");
+        }
+        if (xm_lo && xm_out_n >= 16 && !xm_back_n && f >= xm_moved_at + 30) {
+            // the window [start - 8 MB, + XM_SIZE) over the most sessions, start one of the pieces seen
+            const uint64_t span = (XM_SIZE >> XM_PIECE_SHIFT) - 1;  // (pieces after the 8 MB below)
+            uint64_t best = 0, best_n = 0;
+            for (int i = 0; i < XM_PIECES && xm_tab[i].n; i++) {
+                uint64_t n = 0;
+                for (int j = 0; j < XM_PIECES && xm_tab[j].n; j++)
+                    if (xm_tab[j].piece >= xm_tab[i].piece && xm_tab[j].piece < xm_tab[i].piece + span) n += xm_tab[j].n;
+                if (n > best_n) best_n = n, best = xm_tab[i].piece;
+            }
+            if (best_n >= xm_in_n + 16) {  // (16 sessions more in it, or it stays: no moving back and forth)
+                uint64_t lo = (best << XM_PIECE_SHIFT) - (1ull << XM_PIECE_SHIFT);
+                if (lo < gwin_base) lo = gwin_base;
+                static int nlog;
+                if (nlog++ < 8)
+                    LOG("[vk] transform feedback mirror moved from %llx to %llx (%llu of the last frame's %llu sessions were "
+                        "outside it, %llu now in)\n", (unsigned long long)xm_lo, (unsigned long long)lo,
+                        (unsigned long long)xm_out_n, (unsigned long long)(xm_out_n + xm_in_n), (unsigned long long)best_n);
+                xm_lo = lo;
+                memset(xm_written, 0, sizeof xm_written);
+                xm_moved_at = f;
+            }
+        }
+        xm_in_n = xm_out_n = 0;
+        memset(xm_tab, 0, sizeof xm_tab);
+        xm_frame = f;
+    }
+    if (!xm_lo) return;  // (the first session places it: xm_prepare_)
+    uint64_t at = 0;
+    bool out = false;
+    for (int b = 0; b < 4; b++) {
+        if (!xfb_addr[b] || !xfb_size[b] || !xm_buffer_used(b)) continue;
+        if (!at) at = xfb_addr[b];
+        if (!xm_inside(xfb_addr[b], xfb_size[b])) { out = true; at = xfb_addr[b]; break; }
+    }
+    if (!at) return;
+    if (out) xm_out_n++; else xm_in_n++;
+    uint64_t piece = at >> XM_PIECE_SHIFT;
+    int i = 0;
+    while (i < XM_PIECES && xm_tab[i].n && xm_tab[i].piece != piece) i++;
+    if (i < XM_PIECES) { xm_tab[i].piece = piece; xm_tab[i].n++; }
+}
+
 // before a transform feedback draw: can its buffers all go to the mirror? (then they're marked written, and queued
 // for the copy back)
 static bool xm_prepare_(void);
 static bool xm_prepare(void) {
+    xm_place();
     if (xm_prepare_()) return true;
     // To the heap: the parts of the mirror its buffers cover no longer hold this frame's output (a later read of them
     // takes the heap, where this session writes)
@@ -5126,6 +5199,11 @@ static bool xm_prepare(void) {
 static bool xm_prepare_(void) {
     if (!xm_on() || !gmem_buf) return false;
     if (!xm_buf) {
+        if (g_vk.props.limits.maxStorageBufferRange < XM_SIZE) {  // (bound whole as a storage buffer: XFB_BUFFER_INDEX)
+            static int logged;
+            if (!logged++) LOG("[vk] transform feedback mirror off: storage buffers reach %u bytes\n", g_vk.props.limits.maxStorageBufferRange);
+            return false;
+        }
         VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = XM_SIZE,
                                  .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
                                           VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT};
@@ -5134,8 +5212,8 @@ static bool xm_prepare_(void) {
     }
     for (int b = 0; b < 4; b++) {
         if (!xfb_addr[b] || !xfb_size[b] || !xm_buffer_used(b)) continue;  // (a buffer the program doesn't write: left alone)
-        if (!xm_lo) {  // placed around the first session's buffers (the arena is a few MB)
-            uint64_t lo = (xfb_addr[b] & ~0xFFFFFull) - (16ull << 20);
+        if (!xm_lo) {  // placed around the first session's buffers, half the window each side (then xm_place)
+            uint64_t lo = (xfb_addr[b] & ~0xFFFFFull) - XM_SIZE / 2;
             xm_lo = lo < gwin_base ? gwin_base : lo;
             LOG("[vk] transform feedback mirror at %llx (+%llu MB)\n", (unsigned long long)xm_lo, (unsigned long long)(XM_SIZE >> 20));
         }
@@ -6516,6 +6594,15 @@ static uint32_t stencil_slots(int stage, uint32_t *sint) {
     if (!st.tpool) return 0;
     static int nomemo = -1;
     if (nomemo < 0) nomemo = ENV("LARECOMP_VK_NO_SLOT_MEMO") != NULL;
+    // The draw before's answer, when the stage's 32 bindings and the pool are the same: most draws change none of them,
+    // and the 32 lookups below each touched a random entry of the memo (5 % of the render thread in a town, World
+    // detail 4x: ~11 000 calls a frame)
+    static struct { uint64_t tex[32]; const NvnDescPool *pool; uint32_t gen, m, sint; } last[2];
+    int ls = stage ? 1 : 0;
+    if (!nomemo && last[ls].pool == st.tpool && last[ls].gen == exec_gen && !memcmp(last[ls].tex, st.tex[stage], sizeof last[ls].tex)) {
+        *sint = last[ls].sint;
+        return last[ls].m;
+    }
     static struct { const NvnDescPool *pool; uint32_t tic, gen; int kind; } memo[4096];
     for (int s = 0; s < 32; s++) {
         uint64_t h = st.tex[stage][s];
@@ -6532,6 +6619,8 @@ static uint32_t stencil_slots(int stage, uint32_t *sint) {
         if (k == 1) m |= 1u << s;
         if (k == 2) *sint |= 1u << s;
     }
+    memcpy(last[ls].tex, st.tex[stage], sizeof last[ls].tex);
+    last[ls].pool = st.tpool, last[ls].gen = exec_gen, last[ls].m = m, last[ls].sint = *sint;
     return m;
 }
 
@@ -6902,8 +6991,17 @@ static void draw_(CmdRec *r, bool indexed) {
         static uint64_t last_fs, last_hash;
         uint64_t fs = st.program->stages[1].code_addr;
         if (fs != last_fs) {
+            // (once a frame per shader: a town at World detail 4x switches fragment shader on most of its ~5600 draws,
+            // and hashing 512 bytes each time was 2.5 % of the render thread)
+            static struct { uint64_t fs, hash, frame; } memo[512];
+            uint64_t f = vk_frame_counter() + 1;
+            __typeof__(memo[0]) *e = &memo[(fs >> 6 ^ fs >> 15) & 511];
             last_fs = fs;
-            last_hash = fs ? hmix(1469598103934665603ull, (const void *)(uintptr_t)(fs + 0x30), 0x200) : 0;
+            if (fs && e->fs == fs && e->frame == f) last_hash = e->hash;
+            else {
+                last_hash = fs ? hmix(1469598103934665603ull, (const void *)(uintptr_t)(fs + 0x30), 0x200) : 0;
+                *e = (__typeof__(*e)){fs, last_hash, f};
+            }
         }
         static uint64_t skip[16];
         static int nskip = -1;

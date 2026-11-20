@@ -476,7 +476,7 @@ uint64_t rq_fence_seq(void) {
 uint64_t rq_frame(void) { return exec_frame; }
 
 uint64_t rq_current_item(void) {
-    if (!atomic_load(&started) || !pthread_equal(pthread_self(), thread)) return 0;
+    if (!is_render) return 0;  // (a thread-local flag: pthread_self here was 1 % of the render thread - asked per draw)
     return q_cur;
 }
 
