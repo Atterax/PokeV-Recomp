@@ -475,6 +475,9 @@ uint64_t rq_fence_seq(void) {
 
 uint64_t rq_frame(void) { return exec_frame; }
 
+// A helper of the render thread (vulkan/exec.c's shadow workers: they translate part of the item it runs): the same
+// answers as the render thread from rq_current_item / rq_frame - the frame being translated, not the game thread's
+void rq_helper_thread(void) { is_render = true; }
 uint64_t rq_current_item(void) {
     if (!is_render) return 0;  // (a thread-local flag: pthread_self here was 1 % of the render thread - asked per draw)
     return q_cur;

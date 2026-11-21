@@ -5,6 +5,7 @@
 #include <math.h>
 #include <stdarg.h>
 #include <pthread.h>
+#include <setjmp.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
@@ -399,6 +400,14 @@ int64_t pace_gpu_ns(void) {
 uint64_t vk_cum_wait_ns(void) { return __atomic_load_n(&cum_wait, __ATOMIC_RELAXED); }  // (all vk_wait_seq waits so far)
 uint64_t vk_cum_exec_ns(void) { return __atomic_load_n(&cum_exec, __ATOMIC_RELAXED); }  // (all command list translation time so far)
 
+// Shadow workers (sw_*, below): on one, the command buffer is its secondary and the pass is the render thread's
+static __thread VkCommandBuffer sw_cb;
+static __thread int sw_id = -1;
+static __thread jmp_buf *sw_jmp;  // (a worker, inside a draw) where a pass end unwinds to: the draw is the render thread's
+static bool sw_reexec;  // (render thread) taking over a run from a worker's aborted draw: counters were walked already  // (the worker; -1: none)
+static bool sw_walking;  // (render thread) the state-only walk over a run of lists (sw_run): draws skipped
+static void sw_slot_reset(int slot);
+
 static Sub *sub(void) {
     Sub *s = &subs[cur_sub];
     if (s->seq != submit_seq + 1) {  // slot reused: its previous submission must be done
@@ -415,6 +424,7 @@ static Sub *sub(void) {
             s->ts = s->ts_skip = s->ts_win = false;
         }
         rec_reset_pools(cur_sub);  // (its sets went with the submission; the recorder resets in order)
+        sw_slot_reset(cur_sub);    // (and the shadow workers' secondaries)
         pthread_mutex_lock(&seq_lock);
         s->main_begun = s->upload_begun = false;
         s->seq = submit_seq + 1;
@@ -433,6 +443,7 @@ static void begin_cb(VkCommandBuffer *cb, bool *begun) {
 
 static void gp_mark(VkCommandBuffer cb, const char *fmt, ...);
 VkCommandBuffer vk_cmd(void) {
+    if (sw_cb) return sw_cb;
     Sub *s = sub();
     if (!s->main_begun) {
         begin_cb(&s->main, &s->main_begun);
@@ -621,6 +632,11 @@ void vk_gpuprof_report(void) {
 // Submit the pending work (if any). wait/signal: binary semaphores for presentation (may be null).
 void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra) {
     (void)extra;
+    if (sw_cb) {
+        static int n;
+        if (n++ < 10) LOG("[sw] a shadow worker asked for a submission: ignored\n");
+        return;
+    }
     vk_end_pass();
     vk_tex_unpack_finish();  // (the upload copies recorded so far read what it writes)
     Sub *s = sub();
@@ -1092,7 +1108,7 @@ typedef struct {
 
 typedef struct { uint64_t addr, size; } Range;
 
-static struct {
+typedef struct TState {
     RtState rt;
     bool rt_dirty;
     NvnProgram *program;  // &comp, or NULL with no stage bound
@@ -1117,7 +1133,13 @@ static struct {
     bool prim_restart;
     uint32_t restart_index;
     uint64_t copy_row_stride, copy_image_stride;
-} st;
+} TState;
+// The translation state. The render thread's is st_main; a shadow worker (sw_*) translates its part of a depth-only
+// pass on a copy of it, made at the part's start - st is the calling thread's (st_tls), the render thread's when none.
+static TState st_main;
+static __thread TState *st_tls;
+static inline TState *st_cur(void) { TState *p = st_tls; return p ? p : &st_main; }
+#define st (*st_cur())
 
 uint32_t nvn_window_origin(void);
 uint32_t nvn_depth_mode(void);
@@ -1510,7 +1532,7 @@ typedef struct {
 enum { SS_PIPE = 1 << 0, SS_DT = 1 << 1, SS_DW = 1 << 2, SS_DOP = 1 << 3, SS_STEN = 1 << 4, SS_SFACE0 = 1 << 5, SS_SFACE1 = 1 << 6,
        SS_BC = 1 << 7, SS_CULL = 1 << 8, SS_FF = 1 << 9, SS_TOPO = 1 << 10, SS_PRE = 1 << 11, SS_DBE = 1 << 12, SS_DB = 1 << 13,
        SS_VP = 1 << 14, SS_SC = 1 << 15, SS_IB = 1 << 16, SS_VI = 1 << 17 };
-static struct {
+typedef struct SsState {
     uint32_t known;  // SS_* bits: the value below is what the command buffer has
     uint32_t vb_known;  // per vertex binding
     const void *pipe;   // the Pipe bound (a building one has no handle yet: WAIT_PIPES)
@@ -1526,7 +1548,12 @@ static struct {
     VkBuffer ib; VkDeviceSize io; VkIndexType it;
     VkBuffer vb[17]; VkDeviceSize vo[17];
     VtxLayout vi;  // (dynamic vertex input)
-} ss;
+} SsState;
+// (per command buffer: a shadow worker's secondary has its own - sw_chunk)
+static SsState ss_main;
+static __thread SsState *ss_tls;
+static inline SsState *ss_cur(void) { SsState *p = ss_tls; return p ? p : &ss_main; }
+#define ss (*ss_cur())
 static int ss_on = -1;
 static void ss_forget(void) { ss.known = 0; ss.vb_known = 0; }
 static bool ss_enabled(void) {
@@ -1544,6 +1571,12 @@ static void vk_end_pass_at(int line);
 void vk_end_pass(void) { vk_end_pass_at(0); }
 #define vk_end_pass() vk_end_pass_at(__LINE__)
 static void vk_end_pass_at(int line) {
+    if (sw_cb) {  // (a shadow worker can't end the render thread's pass: the draw goes back to it - sw_run)
+        if (sw_jmp) longjmp(*sw_jmp, 1);
+        static int n;
+        if (n++ < 10) LOG("[sw] a shadow worker asked to end the pass outside a draw (line %d): ignored\n", line);
+        return;
+    }
     if (!in_pass) return;
     if (prof && line < 4096) prof_end_line[line]++;
     rec_CmdEndRendering(vk_cmd());
@@ -1600,7 +1633,9 @@ static bool heap_whole_userptr(void);
 static void gtao_apply_pending(void);
 static void water_apply_pending(void);
 static void gtao_forget(NvnTexture *t);  // (vk_exec_texture_destroyed: the AO and water passes' saved targets)
+static bool pass_secondary;  // (sw_run) the next pass's contents are secondary command buffers
 static void begin_pass(void) {
+    if (sw_cb) return;  // (a shadow worker draws inside the render thread's pass)
     if (in_pass && !st.rt_dirty) return;
     vk_end_pass();
     gtao_apply_pending();  // (the lighting pass just ended: its image times the ambient occlusion)
@@ -1764,6 +1799,7 @@ static void begin_pass(void) {
     pass_w = minw; pass_h = minh;
     pass_layers = layers == UINT32_MAX ? 1 : layers;
     VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, {minw, minh}}, .layerCount = pass_layers,
+                          .flags = pass_secondary ? VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT : 0,
                           .colorAttachmentCount = pass_ncolor, .pColorAttachments = pass_ncolor ? ca : NULL,
                           .pDepthAttachment = has_d ? &da : NULL, .pStencilAttachment = has_s ? &sa : NULL};
     // LARECOMP_VK_LOG_PASSES=<n> (default 300 with =1): each of the first n passes before it begins - an Intel crash
@@ -4032,10 +4068,10 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
         return ubo_span(sp, size);
     }
     if (k == 1) {  // compiler constants stored after the shader code
-        NvnShaderStage *ss = &st.program->stages[stage];
-        uint64_t size = ss->const_size ? ss->const_size : 16;
+        NvnShaderStage *sst = &st.program->stages[stage];
+        uint64_t size = sst->const_size ? sst->const_size : 16;
         if (size < si->cbuf_size[1]) size = si->cbuf_size[1];
-        return ubo_span(guest_copy(ss->code_addr + ss->const_offset, size), size);  // (constant: shared per submission)
+        return ubo_span(guest_copy(sst->code_addr + sst->const_offset, size), size);  // (constant: shared per submission)
     }
     int idx = k - 3;  // cbuf_base
     Range r = (idx >= 0 && idx < 18) ? st.ubuf[stage][idx] : (Range){0, 0};
@@ -6098,7 +6134,7 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
     extern uint32_t vk_view_gen;
     SetCache *c = NULL;
     SetEnt e[MAX_BIND];
-    if (p->reuse && set < 2) {  // the same contents as this program's last set of this index: bind that one again
+    if (p->reuse && set < 2 && !sw_cb) {  // the same contents as this program's last set of this index: bind that one again
         if (!p->scache[set]) p->scache[set] = calloc(1, sizeof *p->scache[set]);
         c = p->scache[set];
         memset(e, 0, (size_t)n * sizeof e[0]);  // (padding: compared with memcmp)
@@ -6255,43 +6291,43 @@ static void cs_tab_put(int at, uint64_t addr, uint64_t fp, CsProg *cp) {
 }
 
 static CsProg *compute_program(NvnProgram *np) {
-    NvnShaderStage *ss = &np->stages[5];
-    if (!ss->code_addr) return NULL;
+    NvnShaderStage *sst = &np->stages[5];
+    if (!sst->code_addr) return NULL;
     struct CsEnt *tab = g_cs_tab;
     int n = g_cs_n, at = -1;
-    uint64_t fp = code_fp(ss);
+    uint64_t fp = code_fp(sst);
     for (int i = 0; i < n && at < 0; i++)
-        if (tab[i].addr == ss->code_addr) {
+        if (tab[i].addr == sst->code_addr) {
             if (tab[i].fp == fp) return tab[i].cp;
             at = i;  // (other code there now: this entry gets the new program)
         }
     uint32_t local[3];
     for (int i = 0; i < 3; i++) {
-        local[i] = ss->control ? *(const uint32_t *)(ss->control + 0x748 + 4 * i) : 1;
+        local[i] = sst->control ? *(const uint32_t *)(sst->control + 0x748 + 4 * i) : 1;
         if (!local[i]) local[i] = 1;
     }
     if (shader_rec_recording()) {
-        ShaderRec rec = {.kind = 'C', .vs = shader_stage_hash(ss), .local = {local[0], local[1], local[2]}};
+        ShaderRec rec = {.kind = 'C', .vs = shader_stage_hash(sst), .local = {local[0], local[1], local[2]}};
         shader_rec_note(&rec);
-        shader_seen_code(rec.vs, ss);  // (its code for the next start's preparation: shader_prep.h)
+        shader_seen_code(rec.vs, sst);  // (its code for the next start's preparation: shader_prep.h)
     }
-    uint64_t ch = shader_stage_hash(ss);
+    uint64_t ch = shader_stage_hash(sst);
     CsProg *cp = ch && prep_cs_n ? PREP_GET(prep_cs, cs_content_key(ch, local)) : NULL;  // prepared before the game
     if (cp) {
-        cs_tab_put(at, ss->code_addr, fp, cp);
-        shader_fp_check(&cp->p.fp[0], ss, "cs");
+        cs_tab_put(at, sst->code_addr, fp, cp);
+        shader_fp_check(&cp->p.fp[0], sst, "cs");
         return cp;
     }
     shader_first_visit("compute", ch, 0, cs_content_key(ch, local));
     cp = calloc(1, sizeof *cp);
-    shader_fp_check(&cp->p.fp[0], ss, "cs");  // (takes the fingerprint)
-    cp->code = ss->code_addr;  // (for the build logs)
-    note_code(ss, fp, "cs");
-    cs_tab_put(at, ss->code_addr, fp, cp);
+    shader_fp_check(&cp->p.fp[0], sst, "cs");  // (takes the fingerprint)
+    cp->code = sst->code_addr;  // (for the build logs)
+    note_code(sst, fp, "cs");
+    cs_tab_put(at, sst->code_addr, fp, cp);
     memcpy(cp->local, local, sizeof local);
-    if (!translate_compute(cp, (const uint8_t *)(uintptr_t)ss->code_addr, ss->const_offset ? ss->const_offset : 0x10000, ss->code_addr))
+    if (!translate_compute(cp, (const uint8_t *)(uintptr_t)sst->code_addr, sst->const_offset ? sst->const_offset : 0x10000, sst->code_addr))
         return cp;
-    save_glsl(cp->si->msl, ss->code_addr, "cs");
+    save_glsl(cp->si->msl, sst->code_addr, "cs");
     run_job(build_compute, cp, &cp->p.state);
     return cp;
 }
@@ -9584,11 +9620,375 @@ void renderer_save_texture_tex(TexBackend *b, const char *path) {
     vmaDestroyImage(g_vk.vma, img, mem);
 }
 
+static void exec_list(uint64_t handle, int depth);
+static bool dseq_now(void);
+static void rt_from_rec(const CmdRec *r, RtState *o) {  // (CMD_SET_RENDER_TARGETS)
+    const struct { uint64_t tex[8]; NvnTextureView views[8]; uint8_t has_view[8]; uint64_t depth;
+                   NvnTextureView dview; uint8_t has_dview; } *rt = (const void *)r->extra;
+    memset(o, 0, sizeof *o);
+    o->ncolor = (int)r->x[0] > 8 ? 8 : (int)r->x[0];
+    for (int i = 0; i < o->ncolor; i++) {
+        o->color[i] = (NvnTexture *)(uintptr_t)rt->tex[i];
+        o->cview[i] = rt->views[i];
+        o->has_cview[i] = rt->has_view[i];
+    }
+    o->depth = (NvnTexture *)(uintptr_t)rt->depth;
+    o->dview = rt->dview;
+    o->has_dview = rt->has_dview;
+}
+// ================================================================== shadow workers
+// A depth-only pass (shadow maps) is a run of called lists of one draw each, ~4200 a frame in a Scarlet / Violet town
+// at World detail 4x - over half the render thread's time, the one that limits the frame rate there. Its lists are
+// split between worker threads: the render thread walks the run once setting state only (sw_walking), copying st at
+// each part's start; each worker translates its part on its copy into a secondary command buffer of its own (sw_cb:
+// vk_cmd returns it, the recorder calls the driver directly for it - record.c rec_worker_enter - and its sets come
+// from pools of its own); the render thread then records the secondaries into its pass in order. A run holds only
+// lists of state and draws (sw_list_draws): anything else ends it. LARECOMP_VK_SHADOW_THREADS=<n> workers (0: off).
+#define SW_MAX 8
+#define SW_LISTS 8192
+#define SW_MIN_DRAWS 48
+// A part: from record p (in list li of h, through list ln - 1), budget draws, on a copy of the state at p
+typedef struct {
+    TState tst;
+    SsState tss;
+    const uint64_t *h;
+    const CmdRec *stop;
+    const CmdRec *abort_r;  // (the worker) the draw it gave back, in list abort_li; its state then is tst
+    uint64_t abort_li;
+    uint64_t li, ln, p;
+    int budget, depth;
+    VkCommandBuffer cb;
+} SwJob;
+static SwJob sw_jobs[SW_MAX];
+static int sw_n = -1;  // workers (LARECOMP_VK_SHADOW_THREADS)
+static int sw_njobs;
+static pthread_mutex_t sw_mu = PTHREAD_MUTEX_INITIALIZER, sw_big = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t sw_go = PTHREAD_COND_INITIALIZER, sw_done = PTHREAD_COND_INITIALIZER;
+static uint64_t sw_gen;
+static int sw_left;
+static uint64_t sw_stop_ops[64], sw_why[4];  // (TEMP diag: what ended runs; why sw_try said no)
+static struct { VkCommandPool pool; VkCommandBuffer *cbs; int n, cap, next; } sw_pools[SW_MAX][VK_SUBS];
+static uint64_t sw_stat_runs, sw_stat_draws, sw_stat_aborts;  // (logged every 600 frames: sw_run)
+static __thread int sw_budget;  // (a worker) draws left in its part
+static __thread const CmdRec *sw_abort_r;  // (a worker) the draw it gave back (exec_list)
+static __thread const CmdRec *sw_stop;  // (a worker, and the walk) the run ends at this record (NULL: its lists' ends)
+static const CmdRec *sw_tail_stop;  // (sw_tail -> exec_list) where the render thread goes on after the run
+// the walk (render thread): where the parts begin
+static int sw_walk_parts, sw_walk_count, sw_walk_k, sw_walk_bound[SW_MAX + 1];
+static uint64_t sw_walk_li;
+// the game's timing counters in a run: query slots taken in the walk, in the game's order, written by the worker
+#define SW_CQ 256
+static struct { const CmdRec *r; uint32_t idx; } sw_cq[SW_CQ];
+static int sw_ncq;
+
+// draws in a list made only of state and draws (following its jumps); -1: something else in it. With stop: the draws
+// before the first record that isn't state or a draw, *stop = that record (NULL: the list's end)
+static int sw_list_draws_at(uint64_t handle, const CmdRec **stop);
+static int sw_list_draws(uint64_t handle) { return sw_list_draws_at(handle, NULL); }
+static int sw_list_draws_at(uint64_t handle, const CmdRec **stop) {
+    if (stop) *stop = NULL;
+    int draws = 0;
+    uint64_t p = handle;
+    for (int guard = 0; guard < 100000; guard++) {
+        const CmdRec *r = (const CmdRec *)(uintptr_t)p;
+        switch (r->op) {
+        case CMD_END: return draws;
+        case CMD_JUMP: p = r->x[0]; continue;
+        case CMD_DRAW_ARRAYS: case CMD_DRAW_ELEMENTS: case CMD_DRAW_ARRAYS_INDIRECT: case CMD_DRAW_ELEMENTS_INDIRECT:
+            draws++;
+            break;
+        case CMD_BARRIER:
+        case CMD_BIND_PROGRAM: case CMD_BIND_BLEND: case CMD_BIND_CHANNEL_MASK: case CMD_BIND_COLOR: case CMD_BIND_DEPTH_STENCIL:
+        case CMD_BIND_MULTISAMPLE: case CMD_BIND_POLYGON: case CMD_BIND_VERTEX_ATTRIB: case CMD_BIND_VERTEX_STREAM:
+        case CMD_BIND_VERTEX_BUFFERS: case CMD_BIND_UNIFORM_BUFFERS: case CMD_BIND_STORAGE_BUFFERS: case CMD_BIND_TEXTURES:
+        case CMD_BIND_IMAGES: case CMD_SET_TEXTURE_POOL: case CMD_SET_SAMPLER_POOL:
+        case CMD_SET_VIEWPORTS: case CMD_SET_SCISSORS: case CMD_SET_DEPTH_RANGES: case CMD_SET_BLEND_COLOR: case CMD_SET_STENCIL:
+        case CMD_SET_PRIMITIVE_RESTART: case CMD_SET_ALPHA_REF: case CMD_SET_DEPTH_BOUNDS: case CMD_SET_POLYGON_OFFSET:
+        case CMD_SET_LINE_WIDTH: case CMD_SET_POINT_SIZE: case CMD_SET_SAMPLE_MASK: case CMD_SET_DEPTH_CLAMP:
+        case CMD_REPORT_COUNTER:  // (its CPU part in the walk, its GPU timestamp in the worker's secondary: exec_list)
+            break;
+        case CMD_SET_RENDER_TARGETS: {  // (the pass's own targets set again: nothing changes)
+            RtState t;
+            rt_from_rec(r, &t);
+            if (memcmp(&t, &st.rt, sizeof t)) { sw_stop_ops[CMD_SET_RENDER_TARGETS]++; if (stop) { *stop = r; return draws; } return -1; }
+            break;
+        }
+        default:
+            if (r->op < 64) sw_stop_ops[r->op]++;
+            if (stop) { *stop = r; return draws; }
+            return -1;
+        }
+        p += r->size;
+    }
+    return -1;
+}
+
+static VkCommandBuffer sw_secondary(int w) {
+    __typeof__(sw_pools[0][0]) *sp = &sw_pools[w][cur_sub];
+    if (!sp->pool) {
+        VkCommandPoolCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT,
+                                      .queueFamilyIndex = g_vk.qfam};
+        VK_CHECK(vkCreateCommandPool(g_vk.dev, &ci, NULL, &sp->pool));
+    }
+    if (sp->next == sp->n) {
+        if (sp->n == sp->cap) { sp->cap = sp->cap ? sp->cap * 2 : 8; sp->cbs = realloc(sp->cbs, sp->cap * sizeof *sp->cbs); }
+        VkCommandBufferAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .commandPool = sp->pool,
+                                          .level = VK_COMMAND_BUFFER_LEVEL_SECONDARY, .commandBufferCount = 1};
+        VK_CHECK(vkAllocateCommandBuffers(g_vk.dev, &ai, &sp->cbs[sp->n++]));
+    }
+    return sp->cbs[sp->next++];
+}
+// (sub(): the slot's submission is done) its secondaries are free again
+static void sw_slot_reset(int slot) {
+    for (int w = 0; w < SW_MAX; w++)
+        if (sw_pools[w][slot].pool && sw_pools[w][slot].next) {
+            vkResetCommandPool(g_vk.dev, sw_pools[w][slot].pool, 0);
+            sw_pools[w][slot].next = 0;
+        }
+}
+
+// a part, on the thread that runs it (a worker, or the render thread for part 0)
+static void sw_chunk(int w, SwJob *j) {
+    st_tls = &j->tst;
+    ss_tls = &j->tss;
+    memset(&j->tss, 0, sizeof j->tss);
+    sw_cb = j->cb;
+    sw_id = w;
+    VkCommandBufferInheritanceRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_RENDERING_INFO,
+                                                  .colorAttachmentCount = pass_ncolor, .pColorAttachmentFormats = pass_color,
+                                                  .depthAttachmentFormat = pass_depth, .stencilAttachmentFormat = pass_stencil,
+                                                  .rasterizationSamples = (VkSampleCountFlagBits)pass_samples};
+    VkCommandBufferInheritanceInfo ii = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO, .pNext = &ri};
+    VkCommandBufferBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                                   .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT | VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT,
+                                   .pInheritanceInfo = &ii};
+    VK_CHECK(vkBeginCommandBuffer(j->cb, &bi));
+    extern void rec_worker_enter(int w, VkCommandBuffer cb), rec_worker_leave(void);
+    rec_worker_enter(w, j->cb);
+    pthread_mutex_lock(&sw_big);  // (phase 1: the draw path isn't thread-safe yet - one part at a time)
+    sw_budget = j->budget;
+    sw_stop = j->stop;
+    j->abort_r = NULL;
+    for (uint64_t i = j->li; i < j->ln && sw_budget > 0 && !j->abort_r; i++) {
+        sw_abort_r = NULL;
+        exec_list(i == j->li ? j->p : j->h[i], j->depth);
+        if (sw_abort_r) j->abort_r = sw_abort_r, j->abort_li = i;
+    }
+    sw_stop = NULL;
+    pthread_mutex_unlock(&sw_big);
+    rec_worker_leave();
+    VK_CHECK(vkEndCommandBuffer(j->cb));
+    sw_cb = VK_NULL_HANDLE;
+    sw_id = -1;
+    st_tls = NULL;
+    ss_tls = NULL;
+}
+
+#include "../../platform.h"
+static void *sw_thread(void *arg) {
+    int w = (int)(intptr_t)arg;
+    plat_thread_perf_core(PLAT_PERF_RENDER);
+    extern void rq_helper_thread(void);
+    rq_helper_thread();  // (vk_frame_counter: the frame being translated, as on the render thread)
+    uint64_t seen = 0;
+    for (;;) {
+        pthread_mutex_lock(&sw_mu);
+        while (sw_gen == seen) pthread_cond_wait(&sw_go, &sw_mu);
+        seen = sw_gen;
+        int njobs = sw_njobs;
+        pthread_mutex_unlock(&sw_mu);
+        if (w < njobs) sw_chunk(w, &sw_jobs[w]);
+        pthread_mutex_lock(&sw_mu);
+        if (--sw_left == 0) pthread_cond_signal(&sw_done);
+        pthread_mutex_unlock(&sw_mu);
+    }
+    return NULL;
+}
+
+static bool sw_enabled(void) {
+    if (sw_n < 0) {
+        const char *e = ENV("LARECOMP_VK_SHADOW_THREADS");
+        sw_n = e ? atoi(e) : 0;
+        if (sw_n > SW_MAX - 1) sw_n = SW_MAX - 1;
+        if (sw_n < 0 || g_vkc.render_pass) sw_n = 0;  // (Vulkan 1.2 render passes: no dynamic rendering inheritance here)
+        for (int w = 1; w <= sw_n; w++) {
+            pthread_t t;
+            if (pthread_create(&t, NULL, sw_thread, (void *)(intptr_t)w)) { sw_n = w - 1; break; }
+            pthread_detach(t);
+        }
+        if (sw_n) LOG("[sw] %d shadow worker threads\n", sw_n);
+    }
+    return sw_n > 0;
+}
+
+// (the walk) a draw: the next part begins after it once enough came before
+static void sw_walk_draw(const CmdRec *r) {
+    sw_walk_count++;
+    if (sw_walk_k + 1 < sw_walk_parts && sw_walk_count == sw_walk_bound[sw_walk_k + 1]) {
+        SwJob *j = &sw_jobs[++sw_walk_k];
+        j->tst = st;
+        if (st.program == &st_main.comp) j->tst.program = &j->tst.comp;
+        j->li = sw_walk_li;
+        j->p = (uint64_t)(uintptr_t)r + r->size;
+    }
+}
+
+static bool sw_pass_ok(void) {  // (the render thread) a depth-only pass, no transform feedback session open
+    if (sw_cb || sw_walking || sw_reexec || !sw_enabled()) return false;
+    if (xfb_on) { sw_why[0]++; return false; }
+    // (not into the window's image: the composites, widescreen boxes, mirror mode and HDR snapshots draw_ makes there
+    // are the render thread's)
+    for (int c = 0; c < st.rt.ncolor; c++) if (st.rt.color[c] && renderer_texture_presented(st.rt.color[c])) return false;
+    static int mode = -1;  // (TEMP bisect) LARECOMP_SW_MODE=1: only passes whose colour slot 0 is empty (shadow maps)
+    if (mode < 0) mode = getenv("LARECOMP_SW_MODE") ? atoi(getenv("LARECOMP_SW_MODE")) : 0;
+    if (mode == 1 && st.rt.ncolor && st.rt.color[0]) return false;
+    if (mode == 2 && !(st.rt.depth && st.rt.depth->width == st.rt.depth->height && !(st.rt.ncolor && st.rt.color[0]))) return false;
+    if (mode == 3 && !(st.rt.depth && st.rt.depth->width != st.rt.depth->height && !(st.rt.ncolor && st.rt.color[0]))) return false;
+    return st.rt.depth != NULL || st.rt.ncolor;
+}
+
+// A run: lists h[0..n) from record first (in h[0]'s list), draws in all; translated by the workers, its state walked
+// here (st_main ends as after the run)
+static void sw_run(const uint64_t *h, uint64_t n, uint64_t first, int depth, int draws, const CmdRec *stop) {
+    // the pass, its contents secondary command buffers (a pass already begun inline ends: its contents are kept)
+    xm_flush_back();
+    vk_end_pass();
+    pass_secondary = true;
+    begin_pass();
+    pass_secondary = false;
+    int parts = sw_n + 1;
+    if (parts > draws / 16) parts = draws / 16 > 1 ? draws / 16 : 1;
+    { static int fp = -1; if (fp < 0) fp = getenv("LARECOMP_SW_PARTS") ? atoi(getenv("LARECOMP_SW_PARTS")) : 0; if (fp > 0 && parts > fp) parts = fp; }  // (TEMP bisect)
+    sw_walk_parts = parts;
+    for (int k = 0; k <= parts; k++) sw_walk_bound[k] = (int)((int64_t)draws * k / parts);
+    sw_walk_count = sw_walk_k = 0;
+    sw_ncq = 0;
+    SwJob *j0 = &sw_jobs[0];
+    j0->tst = st;
+    if (st.program == &st_main.comp) j0->tst.program = &j0->tst.comp;
+    j0->li = 0;
+    j0->p = first;
+    sw_walking = true;
+    sw_stop = stop;
+    for (uint64_t li = 0; li < n; li++) { sw_walk_li = li; exec_list(li ? h[li] : first, depth); }
+    sw_stop = NULL;
+    sw_walking = false;
+    for (int k = 0; k < parts; k++) {
+        SwJob *j = &sw_jobs[k];
+        j->h = h;
+        j->ln = n;
+        j->depth = depth;
+        j->budget = k <= sw_walk_k ? sw_walk_bound[k + 1] - sw_walk_bound[k] : 0;
+        j->stop = stop;
+        j->cb = sw_secondary(k);
+    }
+    static int inorder = -1;  // (TEMP bisect) LARECOMP_SW_INORDER=1: every part here, in order
+    if (inorder < 0) inorder = getenv("LARECOMP_SW_INORDER") ? atoi(getenv("LARECOMP_SW_INORDER")) : 0;
+    if (inorder == 1) { for (int k = 0; k < parts; k++) sw_chunk(k, &sw_jobs[k]); goto parts_done; }
+    if (inorder == 2) { for (int k = parts - 1; k >= 0; k--) sw_chunk(k, &sw_jobs[k]); goto parts_done; }
+    // the workers (part 0 here)
+    pthread_mutex_lock(&sw_mu);
+    sw_njobs = parts;
+    sw_left = sw_n;
+    sw_gen++;
+    pthread_cond_broadcast(&sw_go);
+    pthread_mutex_unlock(&sw_mu);
+    sw_chunk(0, &sw_jobs[0]);  // (part 0 on the render thread, on its copy: st_main stays at the run's end)
+    pthread_mutex_lock(&sw_mu);
+    while (sw_left) pthread_cond_wait(&sw_done, &sw_mu);
+    pthread_mutex_unlock(&sw_mu);
+parts_done:;
+    int ab = -1;  // (the first part that gave a draw back: the parts after it are dropped, it takes over from that draw)
+    for (int k = 0; k < parts && ab < 0; k++) if (sw_jobs[k].budget && sw_jobs[k].abort_r) ab = k;
+    VkCommandBuffer cbs[SW_MAX];
+    int ncb = 0;
+    for (int k = 0; k < parts && (ab < 0 || k <= ab); k++) if (sw_jobs[k].budget) cbs[ncb++] = sw_jobs[k].cb;
+    if (ncb) rec_CmdExecuteCommands(vk_cmd(), (uint32_t)ncb, cbs);
+    vk_end_pass();  // (a pass of secondaries takes nothing else: the next draw begins an inline one)
+    ss_forget();
+    if (ab >= 0) {
+        SwJob *j = &sw_jobs[ab];
+        bool own = j->tst.program == &j->tst.comp;
+        st_main = j->tst;
+        if (own) st_main.program = &st_main.comp;
+        sw_reexec = true;
+        sw_stop = stop;
+        for (uint64_t li = j->abort_li; li < n; li++) exec_list(li == j->abort_li ? (uint64_t)(uintptr_t)j->abort_r : h[li], depth);
+        sw_stop = NULL;
+        sw_reexec = false;
+        sw_stat_aborts++;
+    }
+    sw_stat_runs++;
+    sw_stat_draws += (uint64_t)draws;
+    {
+        static uint64_t last;
+        uint64_t f = vk_frame_counter();
+        if (!last) last = f;
+        if (f >= last + 600) {
+            LOG("[sw] %.1f runs, %.0f draws a frame to the shadow workers (%d parts), %.2f runs a frame taken back\n",
+                sw_stat_runs / (double)(f - last), sw_stat_draws / (double)(f - last), parts, sw_stat_aborts / (double)(f - last));
+            sw_stat_aborts = 0;
+            LOG("[sw] refused: xfb %llu, few draws %llu (first list not ok %llu); stops:", (unsigned long long)sw_why[0],
+                (unsigned long long)sw_why[1], (unsigned long long)sw_why[2]);
+            for (int k = 0; k < 64; k++) if (sw_stop_ops[k]) LOG(" op%d:%llu", k, (unsigned long long)sw_stop_ops[k]);
+            LOG("\n");
+            memset(sw_stop_ops, 0, sizeof sw_stop_ops); memset(sw_why, 0, sizeof sw_why);
+            sw_stat_runs = sw_stat_draws = 0;
+            last = f;
+        }
+    }
+}
+
+// (a CALL's lists) the run of lists from h[i] (of n): the lists it took (0: none)
+static uint64_t sw_try(const uint64_t *h, uint64_t i, uint64_t n, int depth) {
+    if (!sw_pass_ok()) return 0;
+    uint64_t m = 0;
+    int draws = 0;
+    for (; i + m < n && m < SW_LISTS; m++) {
+        int d = sw_list_draws(h[i + m]);
+        if (d < 0) break;
+        draws += d;
+    }
+    if (draws < SW_MIN_DRAWS) { sw_why[1]++; if (m == 0) sw_why[2]++; return 0; }
+    sw_run(h + i, m, h[i], depth + 1, draws, NULL);
+    return m;
+}
+
+// (a draw in a list) the list from record r up to its first record that isn't state or a draw (or its end): true - done,
+// the render thread goes on at sw_tail_stop (NULL: the list's end)
+static bool sw_tail(const CmdRec *r, int depth) {
+    if (!sw_pass_ok()) return false;
+    const CmdRec *stop;
+    int draws = sw_list_draws_at((uint64_t)(uintptr_t)r, &stop);
+    if (draws < SW_MIN_DRAWS) return false;
+    static uint64_t one[1];
+    one[0] = (uint64_t)(uintptr_t)r;
+    sw_run(one, 1, one[0], depth, draws, stop);
+    sw_tail_stop = stop;
+    return true;
+}
+
 // ================================================================== executor (renderer.m exec_list)
+// (TEMP diag) LARECOMP_DIAG_SEQ=<frame>: that frame's command stream, compressed: lists, render targets, runs of
+// draws, other non-state ops
+static long dseq_at = -2;
+static int dseq_draws, dseq_ind;
+static bool dseq_now(void) {
+    if (dseq_at == -2) dseq_at = getenv("LARECOMP_DIAG_SEQ") ? atol(getenv("LARECOMP_DIAG_SEQ")) : -1;
+    return dseq_at >= 0 && (long)vk_frame_counter() == dseq_at;
+}
+static void dseq_flush(void) {
+    if (dseq_draws || dseq_ind) LOG("[seq]   %d draws, %d indirect\n", dseq_draws, dseq_ind);
+    dseq_draws = dseq_ind = 0;
+}
 static void exec_list(uint64_t handle, int depth) {
     uint64_t p = handle;
+    bool sw_no = false;  // (sw_tail said no in this list: not again until its targets change - a scan of the rest each draw)
+    bool dq = dseq_now();
+    if (dq) { dseq_flush(); LOG("[seq] list %llx depth %d\n", (unsigned long long)handle, depth); }
     for (int guard = 0; guard < 10000000; guard++) {
         CmdRec *r = (CmdRec *)(uintptr_t)p;
+        if ((sw_walking || sw_cb || sw_reexec) && r == sw_stop) return;  // (a shadow workers' run ends here)
         // (the records ahead: the game's worker threads wrote them on other cores, and the first read of each one
         // missed the caches - 5 % of the render thread on this line. Records follow one another within a chunk;
         // a prefetch past its end is harmless)
@@ -9596,6 +9996,18 @@ static void exec_list(uint64_t handle, int depth) {
         __builtin_prefetch((const char *)r + 384);
         void *x = r->extra;
         if (r->op < CMD_COUNT) op_counts[r->op]++;
+        if (dq) {
+            if (r->op == CMD_DRAW_ARRAYS || r->op == CMD_DRAW_ELEMENTS) dseq_draws++;
+            else if (r->op == CMD_DRAW_ARRAYS_INDIRECT || r->op == CMD_DRAW_ELEMENTS_INDIRECT || r->op == CMD_MULTI_DRAW_ARRAYS_INDIRECT_COUNT || r->op == CMD_MULTI_DRAW_ELEMENTS_INDIRECT_COUNT) dseq_ind++;
+            else if (r->op == CMD_SET_RENDER_TARGETS) {
+                dseq_flush();
+                const uint64_t *tx = (const uint64_t *)r->extra;
+                NvnTexture *d = *(NvnTexture **)((uint8_t *)r->extra + 8 * 8 + sizeof(NvnTextureView) * 8 + 8);
+                NvnTexture *c0 = r->x[0] ? (NvnTexture *)(uintptr_t)tx[0] : NULL;
+                LOG("[seq]  targets %llu color %ux%u depth %p %ux%u\n", (unsigned long long)r->x[0], c0 ? c0->width : 0, c0 ? c0->height : 0,
+                    (void *)d, 0u, 0u);
+            } else if (!xm_state_op(r->op) || r->op == CMD_BARRIER || r->op == CMD_CALL) { dseq_flush(); LOG("[seq]  op %u\n", r->op); }
+        }
         if (xm_back_n && !xm_state_op(r->op) && !(xfb_on && (r->op == CMD_DRAW_ARRAYS || r->op == CMD_DRAW_ELEMENTS)))
             xm_flush_back();  // (xm_batch: the sessions' output, to the heap before anything that may read it)
         switch (r->op) {
@@ -9603,7 +10015,11 @@ static void exec_list(uint64_t handle, int depth) {
         case CMD_JUMP: p = r->x[0]; continue;
         case CMD_CALL: {
             const uint64_t *h = x;
-            for (uint64_t i = 0; i < r->x[0] && depth < 8; i++) exec_list(h[i], depth + 1);
+            for (uint64_t i = 0; i < r->x[0] && depth < 8; i++) {
+                uint64_t done = sw_try(h, i, r->x[0], depth);  // (lists translated by the shadow workers)
+                if (done) { i += done - 1; continue; }
+                exec_list(h[i], depth + 1);
+            }
             break;
         }
         case CMD_BIND_PROGRAM: {  // (program, NVNshaderStageBits): a game may bind its stages from several programs
@@ -9663,19 +10079,9 @@ static void exec_list(uint64_t handle, int depth) {
         case CMD_SET_TEXTURE_POOL: st.tpool = (NvnDescPool *)(uintptr_t)r->x[0]; break;
         case CMD_SET_SAMPLER_POOL: st.spool = (NvnDescPool *)(uintptr_t)r->x[0]; break;
         case CMD_SET_RENDER_TARGETS: {
-            const struct { uint64_t tex[8]; NvnTextureView views[8]; uint8_t has_view[8]; uint64_t depth;
-                           NvnTextureView dview; uint8_t has_dview; } *rt = x;
             RtState prev = st.rt;  // the same targets again: keep the pass (a restart = full barrier + reload)
-            memset(&st.rt, 0, sizeof st.rt);
-            st.rt.ncolor = (int)r->x[0] > 8 ? 8 : (int)r->x[0];
-            for (int i = 0; i < st.rt.ncolor; i++) {
-                st.rt.color[i] = (NvnTexture *)(uintptr_t)rt->tex[i];
-                st.rt.cview[i] = rt->views[i];
-                st.rt.has_cview[i] = rt->has_view[i];
-            }
-            st.rt.depth = (NvnTexture *)(uintptr_t)rt->depth;
-            st.rt.dview = rt->dview;
-            st.rt.has_dview = rt->has_dview;
+            rt_from_rec(r, &st.rt);
+            sw_no = false;
             static int always = -1;
             if (always < 0) always = ENV("LARECOMP_VK_PASS_RESTART") != NULL;
             if (always || memcmp(&prev, &st.rt, sizeof prev)) st.rt_dirty = true;
@@ -9773,8 +10179,23 @@ static void exec_list(uint64_t handle, int depth) {
             }
             break;
         case CMD_DISPATCH: dispatch_compute((uint32_t)r->x[0], (uint32_t)r->x[1], (uint32_t)r->x[2]); break;
-        case CMD_DRAW_ARRAYS: draw(r, false); break;
-        case CMD_DRAW_ELEMENTS: draw(r, true); break;
+        case CMD_DRAW_ARRAYS: case CMD_DRAW_ELEMENTS:
+            if (sw_walking) { sw_walk_draw(r); break; }
+            if (sw_cb) {  // (a worker: its part ends at its last draw; a draw that needs the render thread goes back)
+                if (sw_budget <= 0) return;
+                jmp_buf jb;
+                sw_jmp = &jb;
+                if (setjmp(jb)) { sw_jmp = NULL; sw_abort_r = r; return; }
+                draw(r, r->op == CMD_DRAW_ELEMENTS);
+                sw_jmp = NULL;
+                sw_budget--;
+                break;
+            } else if (!sw_no) {  // (this list up to its next record that isn't state or a draw: the shadow workers)
+                if (sw_tail(r, depth)) { if (!sw_tail_stop) return; p = (uint64_t)(uintptr_t)sw_tail_stop; continue; }
+                sw_no = true;
+            }
+            draw(r, r->op == CMD_DRAW_ELEMENTS);
+            break;
         case CMD_BEGIN_XFB: xfb_on = true; stat_xfb_sessions++; break;
         case CMD_END_XFB: {
             xfb_on = false;
@@ -9820,8 +10241,24 @@ static void exec_list(uint64_t handle, int depth) {
             break;
         }
         case CMD_DRAW_ARRAYS_INDIRECT: case CMD_DRAW_ELEMENTS_INDIRECT:
-        case CMD_MULTI_DRAW_ARRAYS_INDIRECT_COUNT: case CMD_MULTI_DRAW_ELEMENTS_INDIRECT_COUNT:
+            if (sw_walking) { sw_walk_draw(r); break; }
+            if (sw_cb) {
+                if (sw_budget <= 0) return;
+                jmp_buf jb;
+                sw_jmp = &jb;
+                if (setjmp(jb)) { sw_jmp = NULL; sw_abort_r = r; return; }
+                draw_indirect(r);
+                sw_jmp = NULL;
+                sw_budget--;
+                break;
+            } else if (!sw_no) {
+                if (sw_tail(r, depth)) { if (!sw_tail_stop) return; p = (uint64_t)(uintptr_t)sw_tail_stop; continue; }
+                sw_no = true;
+            }
             draw_indirect(r);
+            break;
+        case CMD_MULTI_DRAW_ARRAYS_INDIRECT_COUNT: case CMD_MULTI_DRAW_ELEMENTS_INDIRECT_COUNT:
+            draw_indirect(r);  // (never in a shadow workers' run: sw_list_draws)
             break;
         case CMD_UPDATE_UNIFORM_BUFFER:
             memcpy((void *)(uintptr_t)(r->x[0] + r->x[2]), x, r->x[3]);
@@ -9837,6 +10274,11 @@ static void exec_list(uint64_t handle, int depth) {
             break;
         }
         case CMD_REPORT_COUNTER: {
+            if (sw_cb || sw_reexec) {  // (a shadow worker, or a take-over: the walk did the CPU part and took the query slot)
+                for (int k = 0; k < sw_ncq; k++)
+                    if (sw_cq[k].r == r) { rec_CmdWriteTimestamp2(vk_cmd(), VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, cq[cur_sub].pool, sw_cq[k].idx); break; }
+                break;
+            }
             // The game times its GPU work with these (two per frame) and drops to 30 fps when that looks slow: the
             // host clock now, replaced by the GPU's time at this point once the submission is done (cq_resolve).
             uint64_t *out = (uint64_t *)(uintptr_t)r->x[1];
@@ -9870,7 +10312,17 @@ static void exec_list(uint64_t handle, int depth) {
                     SDL_DelayPrecise((Uint64)(delay * 1e6));
                 }
             }
-            if (mode == 2 && type == 0) {  // (type 0: timestamp)
+            if (mode == 2 && type == 0 && sw_walking) {  // (in a shadow workers' run: the slot now, in order; the worker writes it)
+                CounterQ *q = &cq[cur_sub];
+                pthread_mutex_lock(&cq_lock);
+                if (q->pool && q->n < CQ_MAX && sw_ncq < SW_CQ) {
+                    sw_cq[sw_ncq].r = r;
+                    sw_cq[sw_ncq++].idx = q->n;
+                    q->out[q->n++] = out;
+                }
+                pthread_mutex_unlock(&cq_lock);
+            }
+            if (mode == 2 && type == 0 && !sw_walking) {  // (type 0: timestamp)
                 VkCommandBuffer cb = vk_cmd();  // (first: may begin the buffer, which resets the slot's queries)
                 CounterQ *q = &cq[cur_sub];
                 pthread_mutex_lock(&cq_lock);
