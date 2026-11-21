@@ -3407,8 +3407,7 @@ static bool alias_valid(const CopyAlias *a) {
 
 static void alias_drop(int i) {
     vk_tex_vgen_bump(aliases[i].dst->backend);  // (the view memos: the destination's views change)
-    aliases[i] = aliases[--naliases];
-    vk_view_gen++;
+    aliases[i] = aliases[--naliases];  // (no view is destroyed: vk_view_gen - the reused sets - stays)
 }
 
 // the real copy of the aspects asked for, into the destination's own image
@@ -3491,8 +3490,7 @@ static bool alias_make(NvnTexture *src, NvnTexture *dst, TexBackend *s, TexBacke
     if (src == dst) return true;  // (copied back onto itself)
     if (naliases == (int)(sizeof aliases / sizeof aliases[0])) return false;
     aliases[naliases++] = (CopyAlias){src, dst, s->image, d->image};
-    vk_view_gen++;
-    vk_tex_vgen_bump(d);
+    vk_tex_vgen_bump(d);  // (no view is destroyed: vk_view_gen - the reused sets - stays)
     stat_alias_made++;
     return true;
 }
@@ -4190,9 +4188,43 @@ static void bind_note(int kind, uint64_t addr, uint64_t size) {
 static void snap_apply_(int stage, uint32_t read_mask);
 static void snap_apply(int stage, uint32_t read_mask) {
     if (!read_mask) { snap_apply_(stage, 0); return; }  // (per context only)
+    // (a shadow worker: the copies' addresses this part had this frame for the same ranges - snap_storage gives every
+    // binder of a range in a frame the same copy - without the lock. Its table's search under the lock was most of the
+    // parts' wait for it once the vertex cache needed none)
+    static struct { uint64_t addr, size, frame, res; } memo_t[NCTX][256];
+    static int binds = -1;
+    if (binds < 0) binds = getenv("LARECOMP_LOG_BINDS") != NULL;
+    extern uint64_t renderer_exec_frame(void);
+    bool quick = sw_cb && stage != 5 && !binds && snap_on();
+    uint64_t f = quick ? renderer_exec_frame() : 0;
+    __typeof__(memo_t[0][0]) *m = memo_t[sw_ctx()];
+    if (quick) {
+        Range eff[16];
+        memcpy(eff, st.sbuf[stage], sizeof eff);
+        bool all = true;
+        for (int i = 0; i < 16 && all; i++) {
+            if (!eff[i].addr || !((read_mask >> i) & 1)) continue;
+            uint64_t h = (eff[i].addr * 0x9E3779B97F4A7C15ull) ^ eff[i].size;
+            __typeof__(m[0]) *e = &m[(h >> 40) & 255];
+            if (e->addr == eff[i].addr && e->size == eff[i].size && e->frame == f) eff[i].addr = e->res;
+            else all = false;
+        }
+        if (all) {
+            sb_eff_on = true;
+            memcpy(sb_eff[stage], eff, sizeof eff);
+            return;
+        }
+    }
     SWL_AT(4059);
     snap_apply_(stage, read_mask);
     SWU();
+    if (quick && sb_eff_on)
+        for (int i = 0; i < 16; i++) {
+            const Range *g = &st.sbuf[stage][i];
+            if (!g->addr || !((read_mask >> i) & 1)) continue;
+            uint64_t h = (g->addr * 0x9E3779B97F4A7C15ull) ^ g->size;
+            m[(h >> 40) & 255] = (__typeof__(m[0])){g->addr, g->size, f, sb_eff[stage][i].addr};
+        }
 }
 static void snap_apply_(int stage, uint32_t read_mask) {
     TLS_LOCALS();
@@ -6476,7 +6508,10 @@ static float g_mirror_w_t[NCTX];  // mirror mode's composite: its render target 
 
 // (set reuse) what a set holds, one entry per descriptor written, in stage_set's order (fixed per program)
 typedef struct { uint32_t binding, type; uint64_t a, b, c; } SetEnt;
-typedef struct SetCache { uint64_t seq; uint32_t view_gen, ds_gen; int n; VkDescriptorSet set; SetEnt e[MAX_BIND]; } SetCache;
+typedef struct SetCache { uint64_t seq; uint32_t view_gen, ds_gen; int n; uint32_t next; VkDescriptorSet set; SetEnt e[MAX_BIND]; } SetCache;
+// (SET_WAYS sets remembered per program, set index and context, the oldest replaced: a program drawing a few materials in
+// turn - a town's walls, roofs, windows - wrote a new set at almost every draw with the last one alone)
+#define SET_WAYS 4
 
 // dyn / ndyn: the set's dynamic offsets are appended at dyn[*ndyn] (binding order, as vkCmdBindDescriptorSets takes
 // them); NULL for programs without dynamic buffers (compute).
@@ -6581,10 +6616,12 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
     extern uint32_t vk_view_gen;
     SetCache *c = NULL;
     SetEnt e[MAX_BIND];
-    if (p->reuse && set < 2) {  // the same contents as this program's last set of this index: bind that one again
+    SetCache *ways = NULL;
+    if (p->reuse && set < 2) {  // the same contents as one of this program's last sets of this index: bind that one again
         struct SetCache **cs = &p->scache[sw_ctx()][set];
-        if (!*cs) *cs = calloc(1, sizeof **cs);  // (each context its own: no other thread writes it)
-        c = *cs;
+        if (!*cs) *cs = calloc(SET_WAYS, sizeof **cs);  // (each context its own: no other thread writes it)
+        ways = *cs;
+        c = &ways[ways[0].next % SET_WAYS];  // (the one replaced on a miss)
         memset(e, 0, (size_t)n * sizeof e[0]);  // (padding: compared with memcmp)
         for (int i = 0; i < n; i++) {
             e[i].binding = w[i].dstBinding;
@@ -6595,11 +6632,16 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
                 e[i].a = (uint64_t)(uintptr_t)bi[i].buffer; e[i].b = bi[i].offset; e[i].c = bi[i].range;
             }
         }
-        if (c->set && c->seq == vk_pending_seq() && c->view_gen == vk_view_gen && c->ds_gen == ds_gen && c->n == n &&
-            !memcmp(c->e, e, (size_t)n * sizeof e[0])) {
-            prof_sets_reused++;
-            return c->set;
+        uint64_t seq = vk_pending_seq();
+        for (int k = 0; k < SET_WAYS; k++) {
+            SetCache *q = &ways[k];
+            if (q->set && q->seq == seq && q->view_gen == vk_view_gen && q->ds_gen == ds_gen && q->n == n &&
+                !memcmp(q->e, e, (size_t)n * sizeof e[0])) {
+                prof_sets_reused++;
+                return q->set;
+            }
         }
+        ways[0].next++;
     }
     VkDescriptorSet ds = vk_alloc_set(layout);
     for (int i = 0; i < n; i++) w[i].dstSet = ds;
@@ -10685,6 +10727,142 @@ static bool sw_pass_ok(void) {  // (the render thread) runs in this pass: no tra
     return st.rt.depth != NULL || st.rt.ncolor;
 }
 
+static void exec_list(uint64_t handle, int depth);
+// (sw_run) the walk over a run's records: their state, as exec_list sets it, and its draws counted (sw_walk_draw) - a
+// loop of its own: exec_list's other work on each record (the shadow workers' and async runs' checks, the transform
+// feedback flush, counts) was most of the walk's ~0.7 us a draw. Ends at the run's stop, a record a run can't hold or a
+// draw that must be the render thread's (sw_cut_r).
+static void walk_list(uint64_t handle, int depth) {
+    TLS_LOCALS();
+#define st_cur() st_l_
+#define ss_cur() ss_l_
+#define pass_cur() pass_l_
+#define sw_ctx() ctx_l_
+    uint64_t p = handle;
+    for (int guard = 0; guard < 10000000; guard++) {
+        CmdRec *r = (CmdRec *)(uintptr_t)p;
+        if (r == sw_stop) return;
+        __builtin_prefetch((const char *)r + 1024);
+        __builtin_prefetch((const char *)r + 2048);
+        void *x = r->extra;
+        (void)x;
+        switch (r->op) {
+        case CMD_END: return;
+        case CMD_JUMP: p = r->x[0]; continue;
+        case CMD_BIND_PROGRAM: {  // (program, NVNshaderStageBits): a game may bind its stages from several programs
+            NvnProgram *p = (NvnProgram *)(uintptr_t)r->x[0];
+            uint32_t m = (uint32_t)r->x[1] & 0x3F;
+            if (!m) m = 0x3F;
+            if (ENV("LARECOMP_LOG_BINDPROG")) {
+                static int n;
+                if (n++ < 40) LOG("[bindprog] %p stages %#x (program has %#x)\n", (void *)p, m, p ? p->stage_mask : 0);
+            }
+            for (int i = 0; i < 6; i++) {
+                if (!(m >> i & 1)) continue;
+                if (p && (p->stage_mask >> i & 1)) {
+                    st.comp.stages[i] = p->stages[i];
+                    st.comp.stage_mask |= 1u << i;
+                } else {
+                    memset(&st.comp.stages[i], 0, sizeof st.comp.stages[i]);
+                    st.comp.stage_mask &= ~(1u << i);
+                }
+            }
+            st.program = st.comp.stage_mask ? &st.comp : NULL;
+            break;
+        }
+        case CMD_BIND_BLEND: { uint8_t *b = x; memcpy(st.blend[b[0] & 7], b, 8); break; }
+        case CMD_BIND_CHANNEL_MASK: memcpy(&st.channel_mask, x, 4); break;
+        case CMD_BIND_COLOR: memcpy(st.color_state, x, 4); break;
+        case CMD_BIND_DEPTH_STENCIL: memcpy(st.ds, x, 8); break;
+        case CMD_BIND_MULTISAMPLE: memcpy(st.ms, x, 0x18); break;
+        case CMD_BIND_POLYGON: memcpy(st.poly, x, 4); break;
+        case CMD_BIND_VERTEX_ATTRIB:
+            st.nattrib = (int)r->x[0] > 16 ? 16 : (int)r->x[0];
+            memcpy(st.attrib, x, st.nattrib * 4);
+            break;
+        case CMD_BIND_VERTEX_STREAM:
+            st.nstream = (int)r->x[0] > 16 ? 16 : (int)r->x[0];
+            memcpy(st.stream, x, st.nstream * 8);
+            break;
+        case CMD_BIND_VERTEX_BUFFERS:
+            for (uint64_t i = 0; i < r->x[1] && r->x[0] + i < 16; i++) memcpy(&st.vbuf[r->x[0] + i], (uint8_t *)x + i * 16, 16);
+            break;
+        case CMD_BIND_UNIFORM_BUFFERS:
+            for (uint64_t i = 0; i < r->x[2] && r->x[1] + i < 18 && r->x[0] < 6; i++)
+                memcpy(&st.ubuf[r->x[0]][r->x[1] + i], (uint8_t *)x + i * 16, 16);
+            break;
+        case CMD_BIND_STORAGE_BUFFERS:
+            for (uint64_t i = 0; i < r->x[2] && r->x[1] + i < 16 && r->x[0] < 6; i++)
+                memcpy(&st.sbuf[r->x[0]][r->x[1] + i], (uint8_t *)x + i * 16, 16);
+            break;
+        case CMD_BIND_TEXTURES:
+            for (uint64_t i = 0; i < r->x[2] && r->x[1] + i < 32 && r->x[0] < 6; i++)
+                memcpy(&st.tex[r->x[0]][r->x[1] + i], (uint8_t *)x + i * 8, 8);
+            break;
+        case CMD_BIND_IMAGES:
+            for (uint64_t i = 0; i < r->x[2] && r->x[1] + i < 8 && r->x[0] < 6; i++)
+                memcpy(&st.img[r->x[0]][r->x[1] + i], (uint8_t *)x + i * 8, 8);
+            break;
+        case CMD_SET_TEXTURE_POOL: st.tpool = (NvnDescPool *)(uintptr_t)r->x[0]; break;
+        case CMD_SET_SAMPLER_POOL: st.spool = (NvnDescPool *)(uintptr_t)r->x[0]; break;
+        case CMD_SET_VIEWPORTS:
+            for (uint64_t i = 0; i < r->x[1] && r->x[0] + i < 16; i++) memcpy(st.viewport[r->x[0] + i], (uint8_t *)x + i * 16, 16);
+            break;
+        case CMD_SET_SCISSORS:
+            for (uint64_t i = 0; i < r->x[1] && r->x[0] + i < 16; i++) memcpy(st.scissor[r->x[0] + i], (uint8_t *)x + i * 16, 16);
+            break;
+        case CMD_SET_DEPTH_RANGES:
+            for (uint64_t i = 0; i < r->x[1] && r->x[0] + i < 16; i++) memcpy(st.depth_range[r->x[0] + i], (uint8_t *)x + i * 8, 8);
+            break;
+        case CMD_SET_BLEND_COLOR: memcpy(st.blend_color, x, 16); break;
+        case CMD_SET_STENCIL: {
+            int face = (int)r->x[0];
+            for (int f = 0; f < 2; f++) {
+                if (!(face & (1 << f))) continue;
+                if (r->x[6] == 0) st.stencil_ref[f] = (uint32_t)r->x[1];
+                else if (r->x[6] == 1) st.stencil_mask[f] = (uint32_t)r->x[1];
+                else st.stencil_vmask[f] = (uint32_t)r->x[1];
+            }
+            break;
+        }
+        case CMD_SET_POLYGON_OFFSET: memcpy(st.poly_offset, r->f, sizeof st.poly_offset); break;
+        case CMD_SET_DEPTH_CLAMP: st.depth_clamp = r->x[0] & 1; break;
+        case CMD_SET_PRIMITIVE_RESTART: st.prim_restart = r->x[0] != 0; st.restart_index = (uint32_t)r->x[1]; break;
+        case CMD_SET_COPY_STRIDES: st.copy_row_stride = r->x[0]; st.copy_image_stride = r->x[1]; break;
+        case CMD_SET_RASTERIZER_DISCARD: raster_discard = r->x[0] & 1; break;
+        case CMD_BARRIER: case CMD_SET_ALPHA_REF: case CMD_SET_DEPTH_BOUNDS: case CMD_SET_LINE_WIDTH: case CMD_SET_POINT_SIZE:
+        case CMD_SET_SAMPLE_MASK:
+            break;
+        case CMD_SET_RENDER_TARGETS: {  // (the pass's own targets again: nothing changes)
+            RtState t;
+            rt_from_rec(r, &t);
+            if (memcmp(&t, &st.rt, sizeof t)) { sw_cut_r = r; sw_cut_li = sw_walk_li; return; }
+            break;
+        }
+        case CMD_DRAW_ARRAYS: case CMD_DRAW_ELEMENTS: case CMD_DRAW_ARRAYS_INDIRECT: case CMD_DRAW_ELEMENTS_INDIRECT:
+            if (sw_walk_risky()) { sw_cut_r = r; sw_cut_li = sw_walk_li; sw_cut_risky = true; return; }  // (the run ends before it)
+            sw_walk_draw(r);
+            break;
+        case CMD_REPORT_COUNTER: {  // (its CPU part and query slot: exec_list's, for this record alone)
+            const CmdRec *stop0 = sw_stop;
+            sw_stop = (const CmdRec *)((const uint8_t *)r + r->size);
+            exec_list((uint64_t)(uintptr_t)r, depth);
+            sw_stop = stop0;
+            break;
+        }
+        default:  // (a record a run can't hold: the run ends before it)
+            sw_cut_r = r;
+            sw_cut_li = sw_walk_li;
+            return;
+        }
+        p += r->size;
+    }
+#undef st_cur
+#undef ss_cur
+#undef pass_cur
+#undef sw_ctx
+}
+
 // A run: lists h[0..n) from record first (in h[0]'s list), draws in all; translated by the workers, its state walked
 // here (st_main ends as after the run)
 static void sw_async_dispatch(const uint64_t *h, uint64_t n, int depth, const CmdRec *stop, int parts);
@@ -10707,7 +10885,13 @@ static void sw_run(const uint64_t *h, uint64_t n, uint64_t first, int depth, int
     sw_stop = stop;
     sw_cut_r = NULL;
     sw_cut_risky = false;
-    for (uint64_t li = 0; li < n && !sw_cut_r; li++) { sw_walk_li = li; exec_list(li ? h[li] : first, depth); }
+    static int old_walk = -1;  // (LARECOMP_VK_SW_WALK_EXEC=1: the walk through exec_list, as before)
+    if (old_walk < 0) old_walk = getenv("LARECOMP_VK_SW_WALK_EXEC") != NULL;
+    for (uint64_t li = 0; li < n && !sw_cut_r; li++) {
+        sw_walk_li = li;
+        if (old_walk) exec_list(li ? h[li] : first, depth);
+        else walk_list(li ? h[li] : first, depth);
+    }
     sw_stat_walk_ns += SDL_GetTicksNS() - tw0;
     sw_stop = NULL;
     sw_walking = false;
