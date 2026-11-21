@@ -6646,14 +6646,8 @@ static bool topology(uint32_t mode, VkPrimitiveTopology *t, uint8_t *cls) {
 // those formats' bits; a float sampler on them is invalid in Vulkan (VUID-vkCmdDraw-format-07753) - NVIDIA returned the
 // bits anyway, other drivers needn't.
 // Each entry's answer (0 neither, 1 usampler, 2 isampler) is kept per texture pool entry for one submitted command list
-// (exec_gen: the game rewrites its pool between submissions, not within one): every draw went through all 32 slots of
-// its stages, reading each bound texture's NvnTexture and backend - two cache misses a slot, 5.5 % of the render
-// thread at 60 fps. LARECOMP_VK_NO_SLOT_MEMO=1: computed each time.
-// One per render-queue item (backend_execute_batch: a whole nvnQueueSubmitCommands call), not per list: the pool's
-// registrations and finalized textures' slots are applied on the render thread between items (objects.c
-// register_texture, pool_entries_forget), never inside one - and Scarlet / Violet submits its frame as one call of ~125
-// lists, so a memo per list was mostly misses (stencil_slots 5.5 % of the render thread, World detail 4x)
-static uint32_t exec_gen;
+// (memoized: every draw went through all 32 slots of its stages, reading each bound texture's NvnTexture and backend
+// - two cache misses a slot, 5.5 % of the render thread at 60 fps. LARECOMP_VK_NO_SLOT_MEMO=1: computed each time.)
 static int slot_kind(const NvnTexEntry *e) {
     if (!renderer_format_has_stencil(e->tex->format)) return vk_view_int_kind(e->tex, &e->view, e->has_view);
     return (e->has_view && (e->view.setmask & 16) ? e->view.ds_mode : e->tex->ds_mode) == 1;
@@ -6663,16 +6657,20 @@ static uint32_t stencil_slots(int stage, uint32_t *sint) {
     if (!st.tpool) return 0;
     static int nomemo = -1;
     if (nomemo < 0) nomemo = ENV("LARECOMP_VK_NO_SLOT_MEMO") != NULL;
-    static struct { const NvnDescPool *pool; uint32_t tic, gen; int kind; } memo[4096];
-    // Only the slots whose binding changed since the stage's draw before (same pool, same queue item): a draw changes
+    // (the pool's change generation: a texture's kind holds while its entry is unchanged - a memo per queue item
+    // recomputed every texture's at its first use each frame, 2.5 % of the render thread)
+    extern _Atomic uint32_t g_pool_gen;
+    uint32_t gen = atomic_load_explicit(&g_pool_gen, memory_order_relaxed);
+    static struct { const NvnDescPool *pool; uint32_t tic, gen; int kind; } memo[16384];
+    // Only the slots whose binding changed since the stage's draw before (same pool, its entries unchanged): a draw changes
     // one or two textures if any, and going through all 32 each time - an entry and its memo line each - was 5 % of the
     // render thread in a town at World detail 4x (~11 000 calls a frame)
     static struct { uint64_t tex[32]; const NvnDescPool *pool; uint32_t gen, m, sint; } last[2];
     int ls = stage ? 1 : 0;
     __typeof__(last[0]) *L = &last[ls];
-    if (nomemo || L->pool != st.tpool || L->gen != exec_gen) {
+    if (nomemo || L->pool != st.tpool || L->gen != gen) {
         memset(L->tex, 0xFF, sizeof L->tex);  // (no handle is all ones: every slot looked at below)
-        L->pool = st.tpool, L->gen = exec_gen, L->m = L->sint = 0;
+        L->pool = st.tpool, L->gen = gen, L->m = L->sint = 0;
     }
     for (int s = 0; s < 32; s++) {
         uint64_t h = st.tex[stage][s];
@@ -6681,12 +6679,12 @@ static uint32_t stencil_slots(int stage, uint32_t *sint) {
         uint32_t tic = h & 0xFFFFF;
         int k = 0;
         if (h && tic < (uint32_t)st.tpool->count) {
-            __typeof__(memo[0]) *c = &memo[tic & 4095];
-            if (!nomemo && c->pool == st.tpool && c->tic == tic && c->gen == exec_gen) k = c->kind;
+            __typeof__(memo[0]) *c = &memo[tic & 16383];
+            if (!nomemo && c->pool == st.tpool && c->tic == tic && c->gen == gen) k = c->kind;
             else {
                 NvnTexEntry *e = &((NvnTexEntry *)st.tpool->entries)[tic];
                 k = e->tex ? slot_kind(e) : 0;
-                *c = (__typeof__(*c)){st.tpool, tic, exec_gen, k};
+                *c = (__typeof__(*c)){st.tpool, tic, gen, k};
             }
         }
         L->m = (L->m & ~(1u << s)) | (k == 1 ? 1u << s : 0);
@@ -7004,6 +7002,8 @@ static void draw(CmdRec *r, bool indexed) {
                     n[1] ? ns[1] / 1e3 / n[1] : 0.0, (unsigned long long)(n[2] / 600), ns[2] / 6e8, n[2] ? ns[2] / 1e3 / n[2] : 0.0);
                 LOG("[drawcost] copy backs %.1f a frame (%.1f for reads)\n", prof_xm_flushes / 600.0, prof_xm_read_flushes / 600.0);
                 prof_xm_flushes = prof_xm_read_flushes = 0;
+                { extern _Atomic uint32_t g_pool_gen; static uint32_t lg; uint32_t g = atomic_load(&g_pool_gen);
+                  LOG("[drawcost] texture pool changes %.1f a frame\n", (g - lg) / 600.0); lg = g; }
                 memset(ns, 0, sizeof ns); memset(n, 0, sizeof n); last = f;
             }
         } else draw_(r, indexed);
@@ -7815,9 +7815,19 @@ static bool ib_overrun(CmdRec *r, const uint32_t *p, uint64_t pa) {
     if (!count || count > (1u << 22) || !ib || ib < GUEST_LO) return false;
     uint32_t restart = st.prim_restart ? st.restart_index : 0xFFFFFFFFu, mx = 0;
     const uint8_t *ip = (const uint8_t *)(uintptr_t)(ib + first * isz);
-    for (uint64_t i = 0; i < count; i++) {
-        uint32_t v = isz == 1 ? ip[i] : isz == 2 ? ((const uint16_t *)ip)[i] : ((const uint32_t *)ip)[i];
-        if (v != (restart & (isz == 1 ? 0xFFu : isz == 2 ? 0xFFFFu : 0xFFFFFFFFu)) && v > mx) mx = v;
+    // (the largest index, once a frame per index range: a mesh is drawn into each shadow cascade and the scene, and
+    // scanning its indices each time was 2.8 % of the render thread in a town at World detail 4x. The game writes
+    // a frame's indices before submitting it)
+    static struct { uint64_t at, count, frame; uint32_t isz, restart, mx; } memo[4096];
+    uint64_t at = (uint64_t)(uintptr_t)ip, frame = vk_frame_counter() + 1;
+    __typeof__(memo[0]) *c = &memo[(at >> 4 ^ at >> 17 ^ count * 0x9E37u) & 4095];
+    if (c->at == at && c->count == count && c->frame == frame && c->isz == isz && c->restart == restart) mx = c->mx;
+    else {
+        for (uint64_t i = 0; i < count; i++) {
+            uint32_t v = isz == 1 ? ip[i] : isz == 2 ? ((const uint16_t *)ip)[i] : ((const uint32_t *)ip)[i];
+            if (v != (restart & (isz == 1 ? 0xFFu : isz == 2 ? 0xFFFFu : 0xFFFFFFFFu)) && v > mx) mx = v;
+        }
+        *c = (__typeof__(*c)){at, count, frame, isz, restart, mx};
     }
     int64_t last = (int64_t)mx + (int32_t)p[3];
     uint64_t stride = st.stream[s][0];
@@ -9603,6 +9613,11 @@ static void exec_list(uint64_t handle, int depth) {
     uint64_t p = handle;
     for (int guard = 0; guard < 10000000; guard++) {
         CmdRec *r = (CmdRec *)(uintptr_t)p;
+        // (the records ahead: the game's worker threads wrote them on other cores, and the first read of each one
+        // missed the caches - 5 % of the render thread on this line. Records follow one another within a chunk;
+        // a prefetch past its end is harmless)
+        __builtin_prefetch((const char *)r + 256);
+        __builtin_prefetch((const char *)r + 384);
         void *x = r->extra;
         if (r->op < CMD_COUNT) op_counts[r->op]++;
         if (xm_back_n && !xm_state_op(r->op) && !(xfb_on && (r->op == CMD_DRAW_ARRAYS || r->op == CMD_DRAW_ELEMENTS)))
@@ -9927,7 +9942,7 @@ static void execute_one(uint64_t handle, bool submit) {
     list_fenced = false;
 }
 
-void backend_execute(uint64_t handle) { exec_gen++; execute_one(handle, true); }
+void backend_execute(uint64_t handle) { execute_one(handle, true); }
 
 // The game hands its command lists over a frame at a time (Pokémon Z-A: ~100 in one nvnQueueSubmitCommands): they go
 // to the GPU in a few submissions instead of one each. ~80 submissions a frame cost ~20 % of the render thread
@@ -9939,7 +9954,6 @@ void backend_execute(uint64_t handle) { exec_gen++; execute_one(handle, true); }
 void backend_execute_batch(const uint64_t *handles, int n) {
     static int each = -1;
     if (each < 0) each = ENV("LARECOMP_VK_SUBMIT_EACH") != NULL;
-    exec_gen++;  // (stencil_slots)
     for (int i = 0; i < n; i++) execute_one(handles[i], each || i == n - 1);
 }
 
