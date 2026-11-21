@@ -6659,39 +6659,41 @@ static int slot_kind(const NvnTexEntry *e) {
     return (e->has_view && (e->view.setmask & 16) ? e->view.ds_mode : e->tex->ds_mode) == 1;
 }
 static uint32_t stencil_slots(int stage, uint32_t *sint) {
-    uint32_t m = 0;
     *sint = 0;
     if (!st.tpool) return 0;
     static int nomemo = -1;
     if (nomemo < 0) nomemo = ENV("LARECOMP_VK_NO_SLOT_MEMO") != NULL;
-    // The draw before's answer, when the stage's 32 bindings and the pool are the same: most draws change none of them,
-    // and the 32 lookups below each touched a random entry of the memo (5 % of the render thread in a town, World
-    // detail 4x: ~11 000 calls a frame)
+    static struct { const NvnDescPool *pool; uint32_t tic, gen; int kind; } memo[4096];
+    // Only the slots whose binding changed since the stage's draw before (same pool, same queue item): a draw changes
+    // one or two textures if any, and going through all 32 each time - an entry and its memo line each - was 5 % of the
+    // render thread in a town at World detail 4x (~11 000 calls a frame)
     static struct { uint64_t tex[32]; const NvnDescPool *pool; uint32_t gen, m, sint; } last[2];
     int ls = stage ? 1 : 0;
-    if (!nomemo && last[ls].pool == st.tpool && last[ls].gen == exec_gen && !memcmp(last[ls].tex, st.tex[stage], sizeof last[ls].tex)) {
-        *sint = last[ls].sint;
-        return last[ls].m;
+    __typeof__(last[0]) *L = &last[ls];
+    if (nomemo || L->pool != st.tpool || L->gen != exec_gen) {
+        memset(L->tex, 0xFF, sizeof L->tex);  // (no handle is all ones: every slot looked at below)
+        L->pool = st.tpool, L->gen = exec_gen, L->m = L->sint = 0;
     }
-    static struct { const NvnDescPool *pool; uint32_t tic, gen; int kind; } memo[4096];
     for (int s = 0; s < 32; s++) {
         uint64_t h = st.tex[stage][s];
+        if (h == L->tex[s]) continue;
+        L->tex[s] = h;
         uint32_t tic = h & 0xFFFFF;
-        if (!h || tic >= (uint32_t)st.tpool->count) continue;
-        int k;
-        __typeof__(memo[0]) *c = &memo[tic & 4095];
-        if (!nomemo && c->pool == st.tpool && c->tic == tic && c->gen == exec_gen) k = c->kind;
-        else {
-            NvnTexEntry *e = &((NvnTexEntry *)st.tpool->entries)[tic];
-            k = e->tex ? slot_kind(e) : 0;
-            *c = (__typeof__(*c)){st.tpool, tic, exec_gen, k};
+        int k = 0;
+        if (h && tic < (uint32_t)st.tpool->count) {
+            __typeof__(memo[0]) *c = &memo[tic & 4095];
+            if (!nomemo && c->pool == st.tpool && c->tic == tic && c->gen == exec_gen) k = c->kind;
+            else {
+                NvnTexEntry *e = &((NvnTexEntry *)st.tpool->entries)[tic];
+                k = e->tex ? slot_kind(e) : 0;
+                *c = (__typeof__(*c)){st.tpool, tic, exec_gen, k};
+            }
         }
-        if (k == 1) m |= 1u << s;
-        if (k == 2) *sint |= 1u << s;
+        L->m = (L->m & ~(1u << s)) | (k == 1 ? 1u << s : 0);
+        L->sint = (L->sint & ~(1u << s)) | (k == 2 ? 1u << s : 0);
     }
-    memcpy(last[ls].tex, st.tex[stage], sizeof last[ls].tex);
-    last[ls].pool = st.tpool, last[ls].gen = exec_gen, last[ls].m = m, last[ls].sint = *sint;
-    return m;
+    *sint = L->sint;
+    return L->m;
 }
 
 
@@ -9917,9 +9919,9 @@ static void execute_one(uint64_t handle, bool submit) {
     static int sync_submit = -1;
     if (sync_submit < 0) sync_submit = ENV("LARECOMP_SYNC_SUBMIT") ? 1 : 0;
     static long batch_draws = -1;
-    if (batch_draws < 0) batch_draws = ENV("LARECOMP_VK_BATCH_DRAWS") ? atol(ENV("LARECOMP_VK_BATCH_DRAWS")) : 400;
+    if (batch_draws < 0) batch_draws = ENV("LARECOMP_VK_BATCH_DRAWS") ? atol(ENV("LARECOMP_VK_BATCH_DRAWS")) : 0;
     if (sync_submit) renderer_flush();
-    else if (submit || list_fenced || cum_draws - submit_draws >= (uint64_t)batch_draws) renderer_submit();
+    else if (submit || list_fenced || (batch_draws > 0 && cum_draws - submit_draws >= (uint64_t)batch_draws)) renderer_submit();
     else if (xm_back_n && !xm_batch()) xm_flush_back();  // (as a submission's end does: a later list may read it - with xm_batch,
                                                           // its first op that isn't state does it)
     list_fenced = false;
@@ -9931,8 +9933,9 @@ void backend_execute(uint64_t handle) { exec_gen++; execute_one(handle, true); }
 // to the GPU in a few submissions instead of one each. ~80 submissions a frame cost ~20 % of the render thread
 // (vkQueueSubmit, a new command buffer and its state, the vertex cache's write-tracking query, a ring slot each).
 // A submission still ends after a list with a fence in it (a waiter on another thread must not find it pending, as
-// before), after LARECOMP_VK_BATCH_DRAWS draws (default 400: the GPU starts on the frame while the rest is
-// translated), and with the call. LARECOMP_VK_SUBMIT_EACH=1: one submission per list, as before.
+// before), after LARECOMP_VK_BATCH_DRAWS draws if set (it was 400 by default, so the GPU started on the frame while the
+// rest was translated; the render passes' chunks do that now - begin_pass - and each submission's vertex cache queries
+// and ring slot cost Scarlet / Violet's ~5700-draw town frames 2.3 fps: 40.2 -> 42.5 without it), and with the call. LARECOMP_VK_SUBMIT_EACH=1: one submission per list, as before.
 void backend_execute_batch(const uint64_t *handles, int n) {
     static int each = -1;
     if (each < 0) each = ENV("LARECOMP_VK_SUBMIT_EACH") != NULL;
