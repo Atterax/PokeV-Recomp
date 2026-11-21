@@ -402,6 +402,9 @@ static Pools wpools[SW_WORKERS][VK_SUBS];
 static __thread VkCommandBuffer rec_wcb;
 static __thread int rec_wid = -1;
 #define DIRECT(cb) (on <= 0 || (rec_wcb && (cb) == rec_wcb))
+// (commands a secondary inside a render pass can't hold: never asked of a worker's own buffer - logged if they are)
+#define SW_NOT_HERE(cb, name) do { if (rec_wcb && (cb) == rec_wcb) { static int n_; \
+    if (n_++ < 5) fprintf(stderr, "[sw] %s on a shadow worker's secondary\n", name); } } while (0)
 void rec_worker_enter(int w, VkCommandBuffer cb) { rec_wid = w; rec_wcb = cb; }
 void rec_worker_leave(void) { rec_wid = -1; rec_wcb = VK_NULL_HANDLE; }
 
@@ -711,7 +714,7 @@ bool rec_present_recreate(void) { return atomic_exchange_explicit(&present_recre
 CMD_ARGS(CmdDispatch, uint32_t x, y, z;)
 static void CmdDispatch_run(const void *p) { const CmdDispatchArgs *a = p; vkCmdDispatch(a->cb, a->x, a->y, a->z); }
 void rec_CmdDispatch(VkCommandBuffer cb, uint32_t x, uint32_t y, uint32_t z) {
-    if (rec_wcb && cb == rec_wcb) { static int n_; if (n_++ < 5) fprintf(stderr, "[sw] %s on a shadow worker's secondary\n", "rec_CmdDispatch"); } CMD_QUEUE(CmdDispatch, cb, x, y, z); }
+    SW_NOT_HERE(cb, "rec_CmdDispatch"); CMD_QUEUE(CmdDispatch, cb, x, y, z); }
 
 CMD_ARGS(CmdBindIndexBuffer, VkBuffer buf; VkDeviceSize off; VkIndexType type;)
 static void CmdBindIndexBuffer_run(const void *p) { const CmdBindIndexBufferArgs *a = p; vkCmdBindIndexBuffer(a->cb, a->buf, a->off, a->type); }
@@ -720,7 +723,7 @@ void rec_CmdBindIndexBuffer(VkCommandBuffer cb, VkBuffer buf, VkDeviceSize off, 
 CMD_ARGS(CmdEndRendering, char pad_;)
 static void CmdEndRendering_run(const void *p) { vkCmdEndRendering(((const CmdEndRenderingArgs *)p)->cb); }
 void rec_CmdEndRendering(VkCommandBuffer cb) {
-    if (rec_wcb && cb == rec_wcb) { static int n_; if (n_++ < 5) fprintf(stderr, "[sw] %s on a shadow worker's secondary\n", "rec_CmdEndRendering"); }
+    SW_NOT_HERE(cb, "rec_CmdEndRendering");
     if (DIRECT(cb)) { vkCmdEndRendering(cb); return; }
     ENQ_T0();
     ((CmdEndRenderingArgs *)push(CmdEndRendering_run, sizeof(CmdEndRenderingArgs), 0))->cb = cb;
@@ -771,7 +774,7 @@ void rec_CmdSetStencilOp(VkCommandBuffer cb, VkStencilFaceFlags face, VkStencilO
 CMD_ARGS(CmdResetQueryPool, VkQueryPool pool; uint32_t first, n;)
 static void CmdResetQueryPool_run(const void *p) { const CmdResetQueryPoolArgs *a = p; vkCmdResetQueryPool(a->cb, a->pool, a->first, a->n); }
 void rec_CmdResetQueryPool(VkCommandBuffer cb, VkQueryPool pool, uint32_t first, uint32_t n) {
-    if (rec_wcb && cb == rec_wcb) { static int n_; if (n_++ < 5) fprintf(stderr, "[sw] %s on a shadow worker's secondary\n", "rec_CmdResetQueryPool"); } CMD_QUEUE(CmdResetQueryPool, cb, pool, first, n); }
+    SW_NOT_HERE(cb, "rec_CmdResetQueryPool"); CMD_QUEUE(CmdResetQueryPool, cb, pool, first, n); }
 
 CMD_ARGS(CmdWriteTimestamp2, VkPipelineStageFlags2 stage; VkQueryPool pool; uint32_t query;)
 static void CmdWriteTimestamp2_run(const void *p) { const CmdWriteTimestamp2Args *a = p; vkCmdWriteTimestamp2(a->cb, a->stage, a->pool, a->query); }
@@ -941,7 +944,7 @@ static void CmdExecuteCommands_run(const void *p) {
     vkCmdExecuteCommands(a->cb, a->n, after(a, sizeof *a));
 }
 void rec_CmdExecuteCommands(VkCommandBuffer cb, uint32_t n, const VkCommandBuffer *cbs) {
-    if (rec_wcb && cb == rec_wcb) { static int n_; if (n_++ < 5) fprintf(stderr, "[sw] %s on a shadow worker's secondary\n", "rec_CmdExecuteCommands"); }
+    SW_NOT_HERE(cb, "rec_CmdExecuteCommands");
     if (DIRECT(cb)) { vkCmdExecuteCommands(cb, n, cbs); return; }
     ENQ_T0();
     CmdExecuteCommandsArgs *a = push(CmdExecuteCommands_run, sizeof *a, n * sizeof *cbs);
@@ -1087,50 +1090,50 @@ static void xfer(PktFn fn, const XferArgs *x, const void *regions, size_t size) 
     ENQ_END();
 }
 void rec_CmdCopyBuffer(VkCommandBuffer cb, VkBuffer src, VkBuffer dst, uint32_t n, const VkBufferCopy *r) {
-    if (rec_wcb && cb == rec_wcb) { static int n_; if (n_++ < 5) fprintf(stderr, "[sw] %s on a shadow worker's secondary\n", "rec_CmdCopyBuffer"); }
+    SW_NOT_HERE(cb, "rec_CmdCopyBuffer");
     if (DIRECT(cb)) { vkCmdCopyBuffer(cb, src, dst, n, r); return; }
     XferArgs x = {.cb = cb, .h1 = (uint64_t)src, .h2 = (uint64_t)dst, .n = n};
     xfer(copy_buffer_run, &x, r, sizeof *r);
 }
 void rec_CmdCopyImage(VkCommandBuffer cb, VkImage src, VkImageLayout sl, VkImage dst, VkImageLayout dl, uint32_t n, const VkImageCopy *r) {
-    if (rec_wcb && cb == rec_wcb) { static int n_; if (n_++ < 5) fprintf(stderr, "[sw] %s on a shadow worker's secondary\n", "rec_CmdCopyImage"); }
+    SW_NOT_HERE(cb, "rec_CmdCopyImage");
     if (DIRECT(cb)) { vkCmdCopyImage(cb, src, sl, dst, dl, n, r); return; }
     XferArgs x = {.cb = cb, .h1 = (uint64_t)src, .h2 = (uint64_t)dst, .l1 = sl, .l2 = dl, .n = n};
     xfer(copy_image_run, &x, r, sizeof *r);
 }
 void rec_CmdBlitImage(VkCommandBuffer cb, VkImage src, VkImageLayout sl, VkImage dst, VkImageLayout dl, uint32_t n, const VkImageBlit *r, VkFilter f) {
-    if (rec_wcb && cb == rec_wcb) { static int n_; if (n_++ < 5) fprintf(stderr, "[sw] %s on a shadow worker's secondary\n", "rec_CmdBlitImage"); }
+    SW_NOT_HERE(cb, "rec_CmdBlitImage");
     if (DIRECT(cb)) { vkCmdBlitImage(cb, src, sl, dst, dl, n, r, f); return; }
     XferArgs x = {.cb = cb, .h1 = (uint64_t)src, .h2 = (uint64_t)dst, .l1 = sl, .l2 = dl, .n = n, .filter = f};
     xfer(blit_image_run, &x, r, sizeof *r);
 }
 void rec_CmdResolveImage(VkCommandBuffer cb, VkImage src, VkImageLayout sl, VkImage dst, VkImageLayout dl, uint32_t n, const VkImageResolve *r) {
-    if (rec_wcb && cb == rec_wcb) { static int n_; if (n_++ < 5) fprintf(stderr, "[sw] %s on a shadow worker's secondary\n", "rec_CmdResolveImage"); }
+    SW_NOT_HERE(cb, "rec_CmdResolveImage");
     if (DIRECT(cb)) { vkCmdResolveImage(cb, src, sl, dst, dl, n, r); return; }
     XferArgs x = {.cb = cb, .h1 = (uint64_t)src, .h2 = (uint64_t)dst, .l1 = sl, .l2 = dl, .n = n};
     xfer(resolve_image_run, &x, r, sizeof *r);
 }
 void rec_CmdCopyBufferToImage(VkCommandBuffer cb, VkBuffer src, VkImage dst, VkImageLayout dl, uint32_t n, const VkBufferImageCopy *r) {
-    if (rec_wcb && cb == rec_wcb) { static int n_; if (n_++ < 5) fprintf(stderr, "[sw] %s on a shadow worker's secondary\n", "rec_CmdCopyBufferToImage"); }
+    SW_NOT_HERE(cb, "rec_CmdCopyBufferToImage");
     if (DIRECT(cb)) { vkCmdCopyBufferToImage(cb, src, dst, dl, n, r); return; }
     XferArgs x = {.cb = cb, .h1 = (uint64_t)src, .h2 = (uint64_t)dst, .l2 = dl, .n = n};
     xfer(buffer_to_image_run, &x, r, sizeof *r);
 }
 void rec_CmdCopyImageToBuffer(VkCommandBuffer cb, VkImage src, VkImageLayout sl, VkBuffer dst, uint32_t n, const VkBufferImageCopy *r) {
-    if (rec_wcb && cb == rec_wcb) { static int n_; if (n_++ < 5) fprintf(stderr, "[sw] %s on a shadow worker's secondary\n", "rec_CmdCopyImageToBuffer"); }
+    SW_NOT_HERE(cb, "rec_CmdCopyImageToBuffer");
     if (DIRECT(cb)) { vkCmdCopyImageToBuffer(cb, src, sl, dst, n, r); return; }
     XferArgs x = {.cb = cb, .h1 = (uint64_t)src, .h2 = (uint64_t)dst, .l1 = sl, .n = n};
     xfer(image_to_buffer_run, &x, r, sizeof *r);
 }
 void rec_CmdClearColorImage(VkCommandBuffer cb, VkImage img, VkImageLayout l, const VkClearColorValue *c, uint32_t n, const VkImageSubresourceRange *rg) {
-    if (rec_wcb && cb == rec_wcb) { static int n_; if (n_++ < 5) fprintf(stderr, "[sw] %s on a shadow worker's secondary\n", "rec_CmdClearColorImage"); }
+    SW_NOT_HERE(cb, "rec_CmdClearColorImage");
     if (DIRECT(cb)) { vkCmdClearColorImage(cb, img, l, c, n, rg); return; }
     XferArgs x = {.cb = cb, .h1 = (uint64_t)img, .l1 = l, .n = n, .clear.color = *c};
     xfer(clear_color_run, &x, rg, sizeof *rg);
 }
 void rec_CmdClearDepthStencilImage(VkCommandBuffer cb, VkImage img, VkImageLayout l, const VkClearDepthStencilValue *c, uint32_t n,
                                    const VkImageSubresourceRange *rg) {
-    if (rec_wcb && cb == rec_wcb) { static int n_; if (n_++ < 5) fprintf(stderr, "[sw] %s on a shadow worker's secondary\n", "rec_CmdClearDepthStencilImage"); }
+    SW_NOT_HERE(cb, "rec_CmdClearDepthStencilImage");
     if (DIRECT(cb)) { vkCmdClearDepthStencilImage(cb, img, l, c, n, rg); return; }
     XferArgs x = {.cb = cb, .h1 = (uint64_t)img, .l1 = l, .n = n, .clear.ds = *c};
     xfer(clear_ds_run, &x, rg, sizeof *rg);
@@ -1150,7 +1153,7 @@ static void CmdPipelineBarrier2_run(const void *p) {
     vkCmdPipelineBarrier2(a->cb, &di);
 }
 void rec_CmdPipelineBarrier2(VkCommandBuffer cb, const VkDependencyInfo *di) {
-    if (rec_wcb && cb == rec_wcb) { static int n_; if (n_++ < 5) fprintf(stderr, "[sw] %s on a shadow worker's secondary\n", "rec_CmdPipelineBarrier2"); }
+    SW_NOT_HERE(cb, "rec_CmdPipelineBarrier2");
     if (DIRECT(cb)) { vkCmdPipelineBarrier2(cb, di); return; }
     if (di->pNext) FATAL("[vk] recorder: a chained dependency\n");
     for (uint32_t i = 0; i < di->memoryBarrierCount; i++) if (di->pMemoryBarriers[i].pNext) FATAL("[vk] recorder: a chained barrier\n");
@@ -1183,7 +1186,7 @@ static void CmdBeginRendering_run(const void *p) {
     vkCmdBeginRendering(a->cb, &ri);
 }
 void rec_CmdBeginRendering(VkCommandBuffer cb, const VkRenderingInfo *ri) {
-    if (rec_wcb && cb == rec_wcb) { static int n_; if (n_++ < 5) fprintf(stderr, "[sw] %s on a shadow worker's secondary\n", "rec_CmdBeginRendering"); }
+    SW_NOT_HERE(cb, "rec_CmdBeginRendering");
     if (DIRECT(cb)) { vkCmdBeginRendering(cb, ri); return; }
     if (ri->pNext) FATAL("[vk] recorder: a chained rendering info\n");
     for (uint32_t i = 0; i < ri->colorAttachmentCount; i++) if (ri->pColorAttachments[i].pNext) FATAL("[vk] recorder: a chained attachment\n");
