@@ -5075,6 +5075,7 @@ static uint16_t xm_wlo[XM_SIZE / XM_CHUNK], xm_whi[XM_SIZE / XM_CHUNK];
 static VkBufferCopy xm_back[XM_BACK_MAX];  // the written ranges not copied back yet (mirror -> heap)
 static int xm_back_n;
 static uint64_t xm_back_lo, xm_back_hi;  // (their bounds, mirror offsets: xm_back_reads)
+static uint64_t xm_back_map[XM_SIZE / XM_CHUNK / 64];  // (their 256-byte chunks: xm_back_reads)
 static bool xm_draw;  // this draw's transform feedback goes to the mirror
 
 static bool xm_on(void) {
@@ -5254,6 +5255,7 @@ static bool xm_prepare_(void) {
             if (!xm_back_n || o < xm_back_lo) xm_back_lo = o;
             if (!xm_back_n || o + xfb_size[b] > xm_back_hi) xm_back_hi = o + xfb_size[b];
             xm_back[xm_back_n++] = (VkBufferCopy){o, xm_lo - gwin_base - gmem_lo + o, xfb_size[b]};
+            for (uint64_t c = o / XM_CHUNK; c <= (o + xfb_size[b] - 1) / XM_CHUNK; c++) xm_back_map[c / 64] |= 1ull << (c % 64);
         }
     }
     return true;
@@ -5269,6 +5271,10 @@ static bool xm_lookup(uint64_t a, uint64_t n, VkBuffer *buf, VkDeviceSize *off) 
 
 // the submission's end (outside any pass): what transform feedback wrote, to the heap
 static void xm_copy_back(VkCommandBuffer cb) {
+    if (xm_back_n) {
+        uint64_t w0 = xm_back_lo / XM_CHUNK / 64, w1 = (xm_back_hi - 1) / XM_CHUNK / 64;
+        memset(&xm_back_map[w0], 0, (w1 - w0 + 1) * sizeof xm_back_map[0]);
+    }
     if (!xm_back_n || !xm_buf || !gmem_buf) { xm_back_n = 0; return; }
     vk_full_barrier(cb);
     rec_CmdCopyBuffer(cb, xm_buf, gmem_buf, (uint32_t)xm_back_n, xm_back);
@@ -5319,10 +5325,17 @@ static bool xm_back_reads(uint64_t a, uint64_t n) {
     if (!xm_back_n || !a || !n || !xm_lo) return false;
     uint64_t lo = xm_lo + xm_back_lo, hi = xm_lo + xm_back_hi;
     if (a >= hi || a + n <= lo) return false;
-    // (inside the bounds: the ranges themselves - the arena's sessions are scattered, and a skinning draw's own inputs
-    // often lie between pending outputs)
-    for (int i = 0; i < xm_back_n; i++)
-        if (a < xm_lo + xm_back[i].srcOffset + xm_back[i].size && a + n > xm_lo + xm_back[i].srcOffset) return true;
+    // (inside the bounds: the ranges' 256-byte chunks - the arena's sessions are scattered, and a skinning draw's own
+    // inputs often lie between pending outputs)
+    uint64_t s0 = (a > lo ? a : lo) - xm_lo, s1 = (a + n < hi ? a + n : hi) - xm_lo;
+    for (uint64_t c = s0 / XM_CHUNK; c <= (s1 - 1) / XM_CHUNK; c++) {
+        if (!(c % 64) && c + 64 <= (s1 - 1) / XM_CHUNK && !xm_back_map[c / 64]) { c += 63; continue; }
+        if (xm_back_map[c / 64] >> (c % 64) & 1) {  // (a chunk one of them is in: the ranges themselves)
+            for (int i = 0; i < xm_back_n; i++)
+                if (a < xm_lo + xm_back[i].srcOffset + xm_back[i].size && a + n > xm_lo + xm_back[i].srcOffset) return true;
+            return false;
+        }
+    }
     return false;
 }
 
@@ -6636,7 +6649,11 @@ static bool topology(uint32_t mode, VkPrimitiveTopology *t, uint8_t *cls) {
 // (exec_gen: the game rewrites its pool between submissions, not within one): every draw went through all 32 slots of
 // its stages, reading each bound texture's NvnTexture and backend - two cache misses a slot, 5.5 % of the render
 // thread at 60 fps. LARECOMP_VK_NO_SLOT_MEMO=1: computed each time.
-static uint32_t exec_gen;  // (backend_execute: one per submitted command list)
+// One per render-queue item (backend_execute_batch: a whole nvnQueueSubmitCommands call), not per list: the pool's
+// registrations and finalized textures' slots are applied on the render thread between items (objects.c
+// register_texture, pool_entries_forget), never inside one - and Scarlet / Violet submits its frame as one call of ~125
+// lists, so a memo per list was mostly misses (stencil_slots 5.5 % of the render thread, World detail 4x)
+static uint32_t exec_gen;
 static int slot_kind(const NvnTexEntry *e) {
     if (!renderer_format_has_stencil(e->tex->format)) return vk_view_int_kind(e->tex, &e->view, e->has_view);
     return (e->has_view && (e->view.setmask & 16) ? e->view.ds_mode : e->tex->ds_mode) == 1;
@@ -9892,7 +9909,6 @@ static void exec_list(uint64_t handle, int depth) {
 static void execute_one(uint64_t handle, bool submit) {
     extern void plat_sample_focus(void);  // (runtime/platform.h: LARECOMP_SAMPLE_EXEC samples this thread)
     plat_sample_focus();
-    exec_gen++;
     uint64_t t0 = SDL_GetTicksNS();
     exec_list(handle, 0);
     uint64_t dt = SDL_GetTicksNS() - t0;
@@ -9909,7 +9925,7 @@ static void execute_one(uint64_t handle, bool submit) {
     list_fenced = false;
 }
 
-void backend_execute(uint64_t handle) { execute_one(handle, true); }
+void backend_execute(uint64_t handle) { exec_gen++; execute_one(handle, true); }
 
 // The game hands its command lists over a frame at a time (Pokémon Z-A: ~100 in one nvnQueueSubmitCommands): they go
 // to the GPU in a few submissions instead of one each. ~80 submissions a frame cost ~20 % of the render thread
@@ -9920,6 +9936,7 @@ void backend_execute(uint64_t handle) { execute_one(handle, true); }
 void backend_execute_batch(const uint64_t *handles, int n) {
     static int each = -1;
     if (each < 0) each = ENV("LARECOMP_VK_SUBMIT_EACH") != NULL;
+    exec_gen++;  // (stencil_slots)
     for (int i = 0; i < n; i++) execute_one(handles[i], each || i == n - 1);
 }
 

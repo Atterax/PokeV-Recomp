@@ -167,6 +167,30 @@ static void *run(void *arg) {
     for (;;) {
         uint64_t h = atomic_load_explicit(&head, memory_order_acquire);
         if (h == t) {
+            // A short spin before sleeping: the translating thread publishes every 4 KB of packets, ~20 us apart in a
+            // busy frame, and records faster than this thread drains - so it slept between nearly every two, and each
+            // publish then woke it through the mutex and condition variable (33 000 a second in a Scarlet / Violet
+            // town at World detail 4x: 5.7 % of the render thread in publish). LARECOMP_VK_RECORDER_SPIN_US (default
+            // 150; 0: sleep at once, as before).
+            static int64_t spin_ns = -1;
+            if (spin_ns < 0) {
+                const char *e = getenv("LARECOMP_VK_RECORDER_SPIN_US");
+                spin_ns = (e ? atoll(e) : 150) * 1000;
+                if (spin_ns < 0) spin_ns = 0;
+            }
+            if (spin_ns) {
+                uint64_t s0 = NOW();
+                for (int k = 0; (h = atomic_load_explicit(&head, memory_order_acquire)) == t; k++) {
+#if defined(__x86_64__) || defined(_M_X64)
+                    __builtin_ia32_pause();
+#elif defined(__aarch64__)
+                    __asm__ volatile("yield");
+#endif
+                    if ((k & 63) == 63 && NOW() - s0 >= (uint64_t)spin_ns) break;
+                }
+            }
+        }
+        if (h == t) {
             pthread_mutex_lock(&mu);
             atomic_store_explicit(&asleep, 1, memory_order_seq_cst);
             while ((h = atomic_load_explicit(&head, memory_order_seq_cst)) == t) pthread_cond_wait(&cv_work, &mu);
