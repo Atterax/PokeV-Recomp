@@ -54,6 +54,7 @@ static bool key_memo_on(void);
 static uint64_t prof_sets_reused, prof_sets_new;  // (VK_PROF) set reuse (allocations: record.c RecStats)
 static bool set_reuse_on(void);
 static uint64_t prof_slot_wait;  // (VK_PROF) sub(): ring slot waits (ns; GPU waits, inside "pre" when begin_pass starts a submission)
+static uint64_t prof_xm_read_flushes;  // (xm_batch: sessions that read a pending copy back)
 static uint64_t prof_hook_draws, prof_hook_known;  // (VK_PROF) draws through the texture hook pass, with a known texture
 // LARECOMP_VK_PROF=1: render-thread time per category in the fps log (exec = whole command lists, draw = draw(),
 // sets = descriptor sets incl. cbuf copies, vtx = index scan + vertex copies, submit = vkQueueSubmit2)
@@ -535,8 +536,9 @@ static void gw_explain(uint64_t pa) {
     LOG("\n");
 }
 
-static char gp_label[512][112];
-static uint32_t gp_draws[512];
+#define GP_MAX 4096  // (marks a frame: a town at World detail 4x has ~550 passes and ~70 submissions)
+static char gp_label[GP_MAX][112];
+static uint32_t gp_draws[GP_MAX];
 // LARECOMP_VK_DEVLOST_TRACE=1: the last 64 GPU operations, dumped on device loss (with LARECOMP_SYNC_SUBMIT=1 the
 // dump ends with the command list that faulted).
 #define DL_N 4096  // (a power of two)
@@ -586,12 +588,12 @@ void vk_devlost_dump(void) {
         }
 }
 static void gp_mark(VkCommandBuffer cb, const char *fmt, ...) {
-    if (!g_gpuprof_frame || gp_n >= 511) return;
+    if (!g_gpuprof_frame || gp_n >= GP_MAX - 1) return;
     if (!gp_qp) {
-        VkQueryPoolCreateInfo qi = {.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = 512};
+        VkQueryPoolCreateInfo qi = {.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = GP_MAX};
         if (vkCreateQueryPool(g_vk.dev, &qi, NULL, &gp_qp) != VK_SUCCESS) { g_gpuprof_frame = false; return; }
     }
-    if (!gp_n) rec_CmdResetQueryPool(cb, gp_qp, 0, 512);
+    if (!gp_n) rec_CmdResetQueryPool(cb, gp_qp, 0, GP_MAX);
     rec_CmdWriteTimestamp2(cb, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, gp_qp, (uint32_t)gp_n);
     va_list ap;
     va_start(ap, fmt);
@@ -604,7 +606,7 @@ void renderer_flush(void);
 void vk_gpuprof_report(void) {
     if (!gp_n) return;
     renderer_flush();
-    uint64_t t[512];
+    static uint64_t t[GP_MAX];
     if (vkGetQueryPoolResults(g_vk.dev, gp_qp, 0, (uint32_t)gp_n, sizeof t, t, 8, VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT) == VK_SUCCESS) {
         double per = g_vk.props.limits.timestampPeriod / 1e6, total = (t[gp_n - 1] - t[0]) * per;
         LOG("[gpuprof] %d marks, %.2f ms first to last (rows: the work after each mark, until the next)\n", gp_n, total);
@@ -1622,7 +1624,10 @@ static void begin_pass(void) {
             extern bool rq_on(void);
             const char *e = getenv("LARECOMP_CHUNK_PASSES");
             chunk_env = e != NULL;
-            chunk = e ? atoi(e) : rq_on() ? 8 : 0;
+            // (32, not Z-A's 8: Scarlet / Violet's town frames have ~550 passes, most of them transform feedback
+            // sessions' - 70 submissions a frame, each with its vertex cache write-tracking queries and a ring slot
+            // the GPU often still held: Mesagoza at World detail 4x 31.6 -> 36.5 fps with 32; 96 and 0 the same)
+            chunk = e ? atoi(e) : rq_on() ? 32 : 0;
         }
         int c = chunk;
         if (c > 0 && !chunk_env && heap_whole_userptr()) {  // (decided at boot: asked here, not cached before it)
@@ -5066,8 +5071,10 @@ static uint32_t xm_written[XM_SIZE / XM_CHUNK];
 // triangles hanging off an NPC and following it (a check of each mirror read against the bytes written found ~1 read
 // in 100 in a town).
 static uint16_t xm_wlo[XM_SIZE / XM_CHUNK], xm_whi[XM_SIZE / XM_CHUNK];
-static VkBufferCopy xm_back[256];  // this submission's written ranges (mirror -> heap)
+#define XM_BACK_MAX 4096
+static VkBufferCopy xm_back[XM_BACK_MAX];  // the written ranges not copied back yet (mirror -> heap)
 static int xm_back_n;
+static uint64_t xm_back_lo, xm_back_hi;  // (their bounds, mirror offsets: xm_back_reads)
 static bool xm_draw;  // this draw's transform feedback goes to the mirror
 
 static bool xm_on(void) {
@@ -5238,18 +5245,14 @@ static bool xm_prepare_(void) {
             }
             xm_written[c] = now;
         }
-        int i = 0;
+        int i = xm_back_n > 8 ? xm_back_n - 8 : 0;  // (the same range again: a session's draws repeat its buffers)
         while (i < xm_back_n && !(xm_back[i].srcOffset == o && xm_back[i].size == xfb_size[b])) i++;
         if (i == xm_back_n) {
-            if (xm_back_n == (int)(sizeof xm_back / sizeof *xm_back)) {  // (full: one range over them all)
-                uint64_t lo = xm_back[0].srcOffset, hi = lo + xm_back[0].size;
-                for (int k = 1; k < xm_back_n; k++) {
-                    if (xm_back[k].srcOffset < lo) lo = xm_back[k].srcOffset;
-                    if (xm_back[k].srcOffset + xm_back[k].size > hi) hi = xm_back[k].srcOffset + xm_back[k].size;
-                }
-                xm_back[0] = (VkBufferCopy){lo, xm_lo - gwin_base - gmem_lo + lo, hi - lo};
-                xm_back_n = 1;
-            }
+            // (full: copied back now, in a pass of its own. Never one range over them all, as before: that carried
+            // the mirror's bytes between the ranges - written by no session this frame - over the heap)
+            if (xm_back_n == XM_BACK_MAX) { vk_end_pass(); xm_copy_back(vk_cmd()); }
+            if (!xm_back_n || o < xm_back_lo) xm_back_lo = o;
+            if (!xm_back_n || o + xfb_size[b] > xm_back_hi) xm_back_hi = o + xfb_size[b];
             xm_back[xm_back_n++] = (VkBufferCopy){o, xm_lo - gwin_base - gmem_lo + o, xfb_size[b]};
         }
     }
@@ -5271,6 +5274,56 @@ static void xm_copy_back(VkCommandBuffer cb) {
     rec_CmdCopyBuffer(cb, xm_buf, gmem_buf, (uint32_t)xm_back_n, xm_back);
     vk_full_barrier(cb);
     xm_back_n = 0;
+}
+
+// The copy back after a run of sessions, not after each one. Each session's end used to copy its output back right away
+// (vertex and storage reads of it outside the mirror: the characters' shading), which ended its render pass and put two
+// full barriers around the copy - Scarlet / Violet skins one character a session, ~500 a frame in a town at People
+// detail 4x: 500 passes, 6.7 ms of GPU time and ~3 ms of the render thread a frame. The sessions follow one another with
+// only state changes between them, so the copy now waits until anything else comes (exec_list: a draw outside a
+// session, a dispatch, a copy, a clear...), a session's draw reads a pending range (xm_back_reads), the list is full,
+// or the submission ends. LARECOMP_VK_XFB_BATCH=0: after each session, as before.
+static bool xm_batch(void) {
+    static int on = -1;
+    if (on < 0) on = !ENV("LARECOMP_VK_XFB_BATCH") || atoi(ENV("LARECOMP_VK_XFB_BATCH")) != 0;
+    return on;
+}
+static uint64_t prof_xm_flushes;
+static void xm_flush_back(void) {
+    if (!xm_back_n) return;
+    prof_xm_flushes++;
+    vk_end_pass();
+    xm_copy_back(vk_cmd());
+}
+// Ops that only set state (no GPU work, nothing read): the pending copy back can wait past them
+static bool xm_state_op(uint32_t op) {
+    switch (op) {
+    case CMD_END: case CMD_JUMP: case CMD_CALL:
+    case CMD_BIND_PROGRAM: case CMD_BIND_BLEND: case CMD_BIND_CHANNEL_MASK: case CMD_BIND_COLOR: case CMD_BIND_DEPTH_STENCIL:
+    case CMD_BIND_MULTISAMPLE: case CMD_BIND_POLYGON: case CMD_BIND_VERTEX_ATTRIB: case CMD_BIND_VERTEX_STREAM:
+    case CMD_BIND_VERTEX_BUFFERS: case CMD_BIND_UNIFORM_BUFFERS: case CMD_BIND_STORAGE_BUFFERS: case CMD_BIND_TEXTURES:
+    case CMD_BIND_IMAGES: case CMD_SET_TEXTURE_POOL: case CMD_SET_SAMPLER_POOL:
+    case CMD_SET_VIEWPORTS: case CMD_SET_SCISSORS: case CMD_SET_DEPTH_RANGES: case CMD_SET_BLEND_COLOR: case CMD_SET_STENCIL:
+    case CMD_SET_PRIMITIVE_RESTART: case CMD_SET_ALPHA_REF: case CMD_SET_DEPTH_BOUNDS: case CMD_SET_POLYGON_OFFSET:
+    case CMD_SET_LINE_WIDTH: case CMD_SET_POINT_SIZE: case CMD_SET_SAMPLE_MASK: case CMD_SET_COPY_STRIDES:
+    case CMD_BEGIN_XFB: case CMD_END_XFB: case CMD_BIND_XFB_BUFFER: case CMD_BIND_XFB_BUFFERS:
+    case CMD_SET_RASTERIZER_DISCARD: case CMD_SET_DEPTH_CLAMP:
+    case CMD_BARRIER:  // (a no-op here: every list starts with one; what reads after it copies back first)
+        return true;
+    default:
+        return false;
+    }
+}
+// A session's draw about to read [a, a + n) (vertex streams, storage, uniforms): inside the pending ranges' bounds?
+static bool xm_back_reads(uint64_t a, uint64_t n) {
+    if (!xm_back_n || !a || !n || !xm_lo) return false;
+    uint64_t lo = xm_lo + xm_back_lo, hi = xm_lo + xm_back_hi;
+    if (a >= hi || a + n <= lo) return false;
+    // (inside the bounds: the ranges themselves - the arena's sessions are scattered, and a skinning draw's own inputs
+    // often lie between pending outputs)
+    for (int i = 0; i < xm_back_n; i++)
+        if (a < xm_lo + xm_back[i].srcOffset + xm_back[i].size && a + n > xm_lo + xm_back[i].srcOffset) return true;
+    return false;
 }
 
 static void gfast_prepare(VkCommandBuffer cb) {
@@ -6892,6 +6945,13 @@ static void vp_box_16_9(void) {
 }
 static void draw(CmdRec *r, bool indexed) {
     PROF_T0();
+    if (xfb_on && xm_back_n) {  // (xm_batch) a session reading a pending range: its copy back first
+        bool reads = false;
+        for (int i = 0; i < 16 && !reads; i++) reads = xm_back_reads(st.vbuf[i].addr, st.vbuf[i].size);
+        for (int i = 0; i < 16 && !reads; i++) reads = xm_back_reads(sbufs(0)[i].addr, sbufs(0)[i].size);
+        for (int i = 0; i < 18 && !reads; i++) reads = xm_back_reads(st.ubuf[0][i].addr, st.ubuf[0][i].size);
+        if (reads) { xm_flush_back(); prof_xm_read_flushes++; }
+    }
     if (xfb_on) {
         xfb_note();
         // the transform feedback buffers are GPU-written: never served from the vertex cache's CPU-side copies (later
@@ -6909,7 +6969,26 @@ static void draw(CmdRec *r, bool indexed) {
                 (unsigned long long)xfb_size[0], (unsigned long long)xfb_addr[1], (unsigned long long)xfb_size[1],
                 (unsigned long long)xfb_addr[2], (unsigned long long)xfb_size[2]);
     }
-    draw_(r, indexed);
+    {   // (diag) LARECOMP_DIAG_DRAWCOST: CPU per draw by kind, every 600 frames
+        static int on = -1; if (on < 0) on = ENV("LARECOMP_DIAG_DRAWCOST") != NULL;
+        if (on) {
+            static uint64_t ns[4], n[4], last;
+            bool depth_only = st.rt.depth && !(st.rt.ncolor && st.rt.color[0]);
+            int k = xfb_on ? 2 : depth_only ? 0 : 1;
+            uint64_t t0 = SDL_GetTicksNS();
+            draw_(r, indexed);
+            ns[k] += SDL_GetTicksNS() - t0; n[k]++;
+            uint64_t f = vk_frame_counter();
+            if (f >= last + 600) {
+                LOG("[drawcost] per frame: depth-only %llu draws %.2f ms (%.2f us), color %llu %.2f ms (%.2f us), xfb %llu %.2f ms (%.2f us)\n",
+                    (unsigned long long)(n[0] / 600), ns[0] / 6e8, n[0] ? ns[0] / 1e3 / n[0] : 0.0, (unsigned long long)(n[1] / 600), ns[1] / 6e8,
+                    n[1] ? ns[1] / 1e3 / n[1] : 0.0, (unsigned long long)(n[2] / 600), ns[2] / 6e8, n[2] ? ns[2] / 1e3 / n[2] : 0.0);
+                LOG("[drawcost] copy backs %.1f a frame (%.1f for reads)\n", prof_xm_flushes / 600.0, prof_xm_read_flushes / 600.0);
+                prof_xm_flushes = prof_xm_read_flushes = 0;
+                memset(ns, 0, sizeof ns); memset(n, 0, sizeof n); last = f;
+            }
+        } else draw_(r, indexed);
+    }
     if (g_vk.hdr && st.rt.color[0] && !st.color_state[0] && st.rt.color[0]->backend &&
         ((TexBackend *)st.rt.color[0]->backend)->presented)
         hdr_snapshot(st.rt.color[0]);  // (the game's picture in the image it shows, before the HUD over it)
@@ -9507,6 +9586,8 @@ static void exec_list(uint64_t handle, int depth) {
         CmdRec *r = (CmdRec *)(uintptr_t)p;
         void *x = r->extra;
         if (r->op < CMD_COUNT) op_counts[r->op]++;
+        if (xm_back_n && !xm_state_op(r->op) && !(xfb_on && (r->op == CMD_DRAW_ARRAYS || r->op == CMD_DRAW_ELEMENTS)))
+            xm_flush_back();  // (xm_batch: the sessions' output, to the heap before anything that may read it)
         switch (r->op) {
         case CMD_END: return;
         case CMD_JUMP: p = r->x[0]; continue;
@@ -9689,7 +9770,7 @@ static void exec_list(uint64_t handle, int depth) {
             xfb_on = false;
             // the mirror's output, to the heap right away: shaders read it there as storage (e.g. the characters'
             // shading - left for the submission's end, cutscenes drew them black and scenery vanished)
-            if (xm_back_n) { vk_end_pass(); xm_copy_back(vk_cmd()); }
+            if (xm_back_n && !xm_batch()) xm_flush_back();  // (else when something else comes: xm_batch)
             static int nlog = -1;  // (debug) LARECOMP_LOG_XFB_DATA=<n>: the first entries of n sessions' buffers, as written
             if (nlog < 0) nlog = ENV("LARECOMP_LOG_XFB_DATA") ? atoi(ENV("LARECOMP_LOG_XFB_DATA")) : 0;
             if (nlog > 0 && renderer_present_count() > 600 && gmem_buf) {
@@ -9823,7 +9904,8 @@ static void execute_one(uint64_t handle, bool submit) {
     if (batch_draws < 0) batch_draws = ENV("LARECOMP_VK_BATCH_DRAWS") ? atol(ENV("LARECOMP_VK_BATCH_DRAWS")) : 400;
     if (sync_submit) renderer_flush();
     else if (submit || list_fenced || cum_draws - submit_draws >= (uint64_t)batch_draws) renderer_submit();
-    else if (xm_back_n) { vk_end_pass(); xm_copy_back(vk_cmd()); }  // (as a submission's end does: a later list may read it)
+    else if (xm_back_n && !xm_batch()) xm_flush_back();  // (as a submission's end does: a later list may read it - with xm_batch,
+                                                          // its first op that isn't state does it)
     list_fenced = false;
 }
 
