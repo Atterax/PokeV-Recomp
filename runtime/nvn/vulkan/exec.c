@@ -54,7 +54,6 @@ static bool key_memo_on(void);
 static uint64_t prof_sets_reused, prof_sets_new;  // (VK_PROF) set reuse (allocations: record.c RecStats)
 static bool set_reuse_on(void);
 static uint64_t prof_slot_wait;  // (VK_PROF) sub(): ring slot waits (ns; GPU waits, inside "pre" when begin_pass starts a submission)
-static uint64_t prof_xm_read_flushes;  // (xm_batch: sessions that read a pending copy back)
 static uint64_t prof_hook_draws, prof_hook_known;  // (VK_PROF) draws through the texture hook pass, with a known texture
 // LARECOMP_VK_PROF=1: render-thread time per category in the fps log (exec = whole command lists, draw = draw(),
 // sets = descriptor sets incl. cbuf copies, vtx = index scan + vertex copies, submit = vkQueueSubmit2)
@@ -5294,10 +5293,8 @@ static bool xm_batch(void) {
     if (on < 0) on = !ENV("LARECOMP_VK_XFB_BATCH") || atoi(ENV("LARECOMP_VK_XFB_BATCH")) != 0;
     return on;
 }
-static uint64_t prof_xm_flushes;
 static void xm_flush_back(void) {
     if (!xm_back_n) return;
-    prof_xm_flushes++;
     vk_end_pass();
     xm_copy_back(vk_cmd());
 }
@@ -6967,7 +6964,7 @@ static void draw(CmdRec *r, bool indexed) {
         for (int i = 0; i < 16 && !reads; i++) reads = xm_back_reads(st.vbuf[i].addr, st.vbuf[i].size);
         for (int i = 0; i < 16 && !reads; i++) reads = xm_back_reads(sbufs(0)[i].addr, sbufs(0)[i].size);
         for (int i = 0; i < 18 && !reads; i++) reads = xm_back_reads(st.ubuf[0][i].addr, st.ubuf[0][i].size);
-        if (reads) { xm_flush_back(); prof_xm_read_flushes++; }
+        if (reads) xm_flush_back();
     }
     if (xfb_on) {
         xfb_note();
@@ -6986,28 +6983,7 @@ static void draw(CmdRec *r, bool indexed) {
                 (unsigned long long)xfb_size[0], (unsigned long long)xfb_addr[1], (unsigned long long)xfb_size[1],
                 (unsigned long long)xfb_addr[2], (unsigned long long)xfb_size[2]);
     }
-    {   // (diag) LARECOMP_DIAG_DRAWCOST: CPU per draw by kind, every 600 frames
-        static int on = -1; if (on < 0) on = ENV("LARECOMP_DIAG_DRAWCOST") != NULL;
-        if (on) {
-            static uint64_t ns[4], n[4], last;
-            bool depth_only = st.rt.depth && !(st.rt.ncolor && st.rt.color[0]);
-            int k = xfb_on ? 2 : depth_only ? 0 : 1;
-            uint64_t t0 = SDL_GetTicksNS();
-            draw_(r, indexed);
-            ns[k] += SDL_GetTicksNS() - t0; n[k]++;
-            uint64_t f = vk_frame_counter();
-            if (f >= last + 600) {
-                LOG("[drawcost] per frame: depth-only %llu draws %.2f ms (%.2f us), color %llu %.2f ms (%.2f us), xfb %llu %.2f ms (%.2f us)\n",
-                    (unsigned long long)(n[0] / 600), ns[0] / 6e8, n[0] ? ns[0] / 1e3 / n[0] : 0.0, (unsigned long long)(n[1] / 600), ns[1] / 6e8,
-                    n[1] ? ns[1] / 1e3 / n[1] : 0.0, (unsigned long long)(n[2] / 600), ns[2] / 6e8, n[2] ? ns[2] / 1e3 / n[2] : 0.0);
-                LOG("[drawcost] copy backs %.1f a frame (%.1f for reads)\n", prof_xm_flushes / 600.0, prof_xm_read_flushes / 600.0);
-                prof_xm_flushes = prof_xm_read_flushes = 0;
-                { extern _Atomic uint32_t g_pool_gen; static uint32_t lg; uint32_t g = atomic_load(&g_pool_gen);
-                  LOG("[drawcost] texture pool changes %.1f a frame\n", (g - lg) / 600.0); lg = g; }
-                memset(ns, 0, sizeof ns); memset(n, 0, sizeof n); last = f;
-            }
-        } else draw_(r, indexed);
-    }
+    draw_(r, indexed);
     if (g_vk.hdr && st.rt.color[0] && !st.color_state[0] && st.rt.color[0]->backend &&
         ((TexBackend *)st.rt.color[0]->backend)->presented)
         hdr_snapshot(st.rt.color[0]);  // (the game's picture in the image it shows, before the HUD over it)
