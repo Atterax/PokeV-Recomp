@@ -10239,8 +10239,10 @@ static void rt_from_rec(const CmdRec *r, RtState *o) {  // (CMD_SET_RENDER_TARGE
 // secondaries into the pass in order. The state the draws share (programs, pipelines, texture uploads and views, the
 // vertex cache, snapshots) is changed under SWL; the per-draw caches are per thread (NCTX, sw_ctx).
 // Town at World detail 4x (Ryzen 7 5700X, RTX 3080): 41 -> 46 fps with 4 workers; 6 workers draw no faster and take
-// cores from the game. LARECOMP_VK_SHADOW_THREADS=<n> workers (0: off); by default 4 from 12 CPU threads, 2 from 8,
-// else none, with the recorder thread on.
+// cores from the game. Once the game's GPU thread no longer walked the lists (rqueue.c's list table) it was as busy as
+// this one, and 3 workers left its job threads more: 55.7 fps against 54.2 with 4 (5 runs each).
+// LARECOMP_VK_SHADOW_THREADS=<n> workers (0: off); by default 3 from 12 CPU threads, 2 from 8, else none, with the
+// recorder thread on.
 #define SW_MAX 8
 #define SW_LISTS 8192
 #define SW_MIN_DRAWS 48
@@ -10517,7 +10519,7 @@ static bool sw_enabled(void) {
         const char *e = ENV("LARECOMP_VK_SHADOW_THREADS");
         extern bool rec_on(void);
         int cpus = SDL_GetNumLogicalCPUCores();
-        sw_n = e ? atoi(e) : !rec_on() ? 0 : cpus >= 12 ? 4 : cpus >= 8 ? 2 : 0;
+        sw_n = e ? atoi(e) : !rec_on() ? 0 : cpus >= 12 ? 3 : cpus >= 8 ? 2 : 0;
         if (sw_n > SW_MAX - 1) sw_n = SW_MAX - 1;
         if (sw_n < 0 || g_vkc.render_pass) sw_n = 0;  // (Vulkan 1.2 render passes: no dynamic rendering inheritance here)
         for (int w = 1; w <= sw_n; w++) {
