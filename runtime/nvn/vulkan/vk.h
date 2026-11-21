@@ -237,7 +237,12 @@ typedef struct TexBackend {
     // (g_vk.lean_usage) the only formats views of this image may have: nview_fmt 0 = any compatible one
     VkFormat view_fmt[2];
     uint8_t nview_fmt;
+    // a new value (vk_vgen_next) whenever a view of it may be destroyed or its views would change: exec.c's view
+    // memos, per texture (vk_view_gen moved for all of them several times a frame - copy aliases, view cache
+    // evictions - and the memos missed ~85 % of the time)
+    uint64_t vgen;
 } TexBackend;
+void vk_tex_vgen_bump(TexBackend *b);
 
 static inline bool vk_format_is_srgb(VkFormat f) {
     switch (f) {

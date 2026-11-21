@@ -44,6 +44,7 @@
 #include "record.h"
 
 #include <pthread.h>
+#include <sched.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
@@ -127,9 +128,24 @@ static void wait_room(uint64_t need) {
     st_t.full_ns += NOW() - t0;
 }
 
+// The ring has one writer, T - except while exec.c's shadow workers translate runs asynchronously (exec.c sw_async_*):
+// then T keeps translating, and a worker's calls for buffers other than its own secondary (the submission's upload
+// buffer: texture uploads) are queued too. rec_queue_shared(true) from T before the workers start, false once they are
+// all done; meanwhile every packet is written between push and commit under q_mx (a spin lock: packets take ~50 ns).
+static _Atomic int q_mx;
+static bool q_shared;
+void rec_queue_shared(bool on_) { q_shared = on_; }
+static inline void q_lock(void) {
+    if (!q_shared) return;
+    while (atomic_exchange_explicit(&q_mx, 1, memory_order_acquire))
+        while (atomic_load_explicit(&q_mx, memory_order_relaxed)) __builtin_ia32_pause();
+}
+static inline void q_unlock(void) { if (q_shared) atomic_store_explicit(&q_mx, 0, memory_order_release); }
+
 // T: a packet for fn with `args` bytes of arguments (+ `extra` bytes of arrays after them, each caller aligns its
 // own); returns the arguments' place. Committed with commit() once filled.
 static void *push(PktFn fn, size_t args, size_t extra) {
+    q_lock();
     uint64_t need = (sizeof(PktHdr) + ((args + PKT_ALIGN - 1) & ~(size_t)(PKT_ALIGN - 1)) + extra + PKT_ALIGN - 1) & ~(uint64_t)(PKT_ALIGN - 1);
     if (need > ring_cap / 4) FATAL("[vk] recorder: a packet of %llu bytes does not fit the ring\n", (unsigned long long)need);
     uint64_t at = wpos & (ring_cap - 1);
@@ -153,6 +169,7 @@ static void *push(PktFn fn, size_t args, size_t extra) {
 }
 static void commit(void) {
     if (wpos - published >= PUBLISH_EVERY) publish();
+    q_unlock();
 }
 // (the arrays of a packet: after its arguments, 16-aligned)
 #define AL16(n) (((n) + 15) & ~(size_t)15)
@@ -629,7 +646,8 @@ void rec_QueueSubmit2(const VkSubmitInfo2 *si, uint64_t seq) {
     if (on <= 0) { submit_run(&a); return; }
     ENQ_T0();
     *(SubmitArgs *)push(submit_run, sizeof a, 0) = a;
-    publish();  // (whoever waits for the submission must not wait for the next batch)
+    publish();
+    q_unlock();  // (whoever waits for the submission must not wait for the next batch)
     ENQ_END();
 }
 
@@ -678,6 +696,7 @@ void rec_QueuePresentKHR(VkSemaphore wait, VkSwapchainKHR swapchain, uint32_t im
     ENQ_T0();
     *(PresentArgs *)push(present_run, sizeof a, 0) = a;
     publish();
+    q_unlock();
     ENQ_END();
 }
 bool rec_present_recreate(void) { return atomic_exchange_explicit(&present_recreate, 0, memory_order_acq_rel) != 0; }
@@ -929,6 +948,30 @@ void rec_CmdExecuteCommands(VkCommandBuffer cb, uint32_t n, const VkCommandBuffe
     *a = (CmdExecuteCommandsArgs){cb, n};
     memcpy(after(a, sizeof *a), cbs, n * sizeof *cbs);
     commit();
+    ENQ_END();
+}
+
+// (exec.c sw_async: a run's secondaries, recorded by the shadow workers while T went on) executed once *left is 0 -
+// the workers fill cbs[0..n) (NULL: a part without draws) before they count down
+typedef struct { VkCommandBuffer cb; _Atomic int *left; const VkCommandBuffer *cbs; uint32_t n; _Atomic int *consumed; } ExecWaitArgs;
+static void exec_wait_run(const void *p) {
+    const ExecWaitArgs *a = p;
+    for (uint32_t k = 0; atomic_load_explicit(a->left, memory_order_acquire) > 0; k++) {
+        if (k < 4000) __builtin_ia32_pause();
+        else sched_yield();
+    }
+    VkCommandBuffer v[16];
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < a->n && n < 16; i++) if (a->cbs[i]) v[n++] = a->cbs[i];
+    if (n) vkCmdExecuteCommands(a->cb, n, v);
+    atomic_store_explicit(a->consumed, 1, memory_order_release);
+}
+bool rec_exec_wait_ok(void) { return on > 0; }  // (the recorder runs: T needn't wait for the workers itself)
+void rec_CmdExecuteCommandsWait(VkCommandBuffer cb, _Atomic int *left, const VkCommandBuffer *cbs, uint32_t n, _Atomic int *consumed) {
+    ENQ_T0();
+    *(ExecWaitArgs *)push(exec_wait_run, sizeof(ExecWaitArgs), 0) = (ExecWaitArgs){cb, left, cbs, n, consumed};
+    publish();  // (the recorder may start waiting at once)
+    q_unlock();
     ENQ_END();
 }
 
