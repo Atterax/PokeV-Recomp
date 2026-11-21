@@ -355,7 +355,95 @@ static void fences_add(Fences *f, uint64_t guest) {
     }
     f->p[f->n++] = guest;
 }
+// The lists recorded (cmdbuf.c: rq_list_ended), by their first record: their fences and the lists they call. A
+// submission took every fence by walking all its lists' records, and the lists they call each time they're called -
+// in a Scarlet / Violet town at World detail 4x 125 lists a frame calling others ~270 000 times, 2.6 ms of the game's
+// GPU thread a frame, between its wait for the last frame's translation and this one's submission, which the render
+// thread waited for. Now each list once a submission (lt_seen), from the table; one not found there (written over, or
+// with more fences than its recorder kept) is walked as before. LARECOMP_RQ_LIST_TABLE=0: every list walked, each time.
+#define LT_SIZE 65536
+typedef struct { uint64_t handle, fence[8], *call; uint8_t nf; int nc, cap; } ListEnt;
+static ListEnt lt[LT_SIZE];
+static pthread_mutex_t lt_lock = PTHREAD_MUTEX_INITIALIZER;  // (the table; a submission's look-ups hold it throughout)
+static int lt_on(void) {
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("LARECOMP_RQ_LIST_TABLE");
+        on = !(e && !strcmp(e, "0"));
+    }
+    return on;
+}
+static unsigned lt_slot(uint64_t h) { return (unsigned)((h >> 3) * 0x9E3779B97F4A7C15ull >> 48) & (LT_SIZE - 1); }
+void rq_list_ended(uint64_t handle, const uint64_t *fences, int nf, const uint64_t *calls, int nc, bool many) {
+    if (!lt_on()) return;
+    ListEnt *e = &lt[lt_slot(handle)];
+    pthread_mutex_lock(&lt_lock);
+    e->handle = 0;  // (an earlier list's entry here is gone either way)
+    if (!many && nc > e->cap) {
+        uint64_t *p = realloc(e->call, sizeof *p * (size_t)nc);
+        if (p) e->call = p, e->cap = nc;
+    }
+    if (!many && nc <= e->cap) {
+        e->handle = handle;
+        e->nf = (uint8_t)nf, e->nc = nc;
+        memcpy(e->fence, fences, sizeof *fences * (size_t)nf);
+        if (nc) memcpy(e->call, calls, sizeof *calls * (size_t)nc);
+    }
+    pthread_mutex_unlock(&lt_lock);
+}
+// The lists one submission has looked at, and how deep (a list seen deeper than the walk's limit is looked at again
+// nearer the top): per submitting thread, entries of earlier submissions told apart by lt_gen.
+#define SEEN_SIZE 65536
+typedef struct { uint64_t handle; uint32_t gen; int depth; } SeenEnt;
+static __thread SeenEnt *lt_seen;
+static __thread uint32_t lt_gen;
+static __thread int lt_nseen;
+static bool lt_first(uint64_t handle, int depth) {
+    if (!lt_seen) return true;
+    if (lt_nseen >= SEEN_SIZE / 2) return true;  // (full enough: the rest each time, as before)
+    for (unsigned i = (unsigned)((handle >> 3) * 0x9E3779B97F4A7C15ull >> 48) & (SEEN_SIZE - 1);; i = (i + 1) & (SEEN_SIZE - 1)) {
+        SeenEnt *s = &lt_seen[i];
+        if (s->gen != lt_gen) {
+            *s = (SeenEnt){handle, lt_gen, depth};
+            lt_nseen++;
+            return true;
+        }
+        if (s->handle == handle) {
+            if (depth >= s->depth) return false;
+            s->depth = depth;
+            return true;
+        }
+    }
+}
+static void prescan(uint64_t handle, Fences *f, int depth);
+static bool prescan_table(uint64_t handle, Fences *f, int depth) {
+    if (!lt_on()) return false;
+    const ListEnt *e = &lt[lt_slot(handle)];
+    if (e->handle != handle) return false;
+    for (int i = 0; i < e->nf; i++) fences_add(f, e->fence[i]);
+    for (int i = 0; i < e->nc && depth < 8; i++)
+        if (lt_first(e->call[i], depth + 1)) prescan(e->call[i], f, depth + 1);
+    return true;
+}
+// A submission's fences: its lists' and those they call, each list once (lt_seen)
+static void prescan_all(const uint64_t *handles, int n, Fences *f) {
+    if (!lt_on()) {
+        for (int i = 0; i < n; i++) prescan(handles[i], f, 0);
+        return;
+    }
+    if (!lt_seen) lt_seen = calloc(SEEN_SIZE, sizeof *lt_seen);
+    if (++lt_gen == 0) {  // (wrapped: entries of 2^32 submissions ago would look like this one's)
+        if (lt_seen) memset(lt_seen, 0, SEEN_SIZE * sizeof *lt_seen);
+        lt_gen = 1;
+    }
+    lt_nseen = 0;
+    pthread_mutex_lock(&lt_lock);
+    for (int i = 0; i < n; i++)
+        if (lt_first(handles[i], 0)) prescan(handles[i], f, 0);
+    pthread_mutex_unlock(&lt_lock);
+}
 static void prescan(uint64_t handle, Fences *f, int depth) {
+    if (prescan_table(handle, f, depth)) return;
     uint64_t p = handle;
     for (int guard = 0; guard < 10000000; guard++) {
         const CmdRec *r = (const CmdRec *)(uintptr_t)p;
@@ -364,7 +452,8 @@ static void prescan(uint64_t handle, Fences *f, int depth) {
         case CMD_JUMP: p = r->x[0]; continue;
         case CMD_CALL: {
             const uint64_t *h = (const uint64_t *)r->extra;
-            for (uint64_t i = 0; i < r->x[0] && depth < 8; i++) prescan(h[i], f, depth + 1);
+            for (uint64_t i = 0; i < r->x[0] && depth < 8; i++)
+                if (!lt_on() || lt_first(h[i], depth + 1)) prescan(h[i], f, depth + 1);
             break;
         }
         case CMD_FENCE_SYNC:
@@ -384,7 +473,7 @@ uint64_t rq_submit_lists(const uint64_t *handles, int n) {
     if (n == 1) return rq_submit(handles[0]);
     Fences f = {.n = 0, .cap = 32};
     f.p = f.v;
-    for (int i = 0; i < n; i++) prescan(handles[i], &f, 0);
+    prescan_all(handles, n, &f);
     Item it = {.kind = IT_EXEC, .lists = malloc(sizeof *it.lists * (size_t)n), .nlists = n};
     memcpy(it.lists, handles, sizeof *it.lists * (size_t)n);
     uint64_t q = enqueue(&it, f.p, f.n);
@@ -395,7 +484,7 @@ uint64_t rq_submit_lists(const uint64_t *handles, int n) {
 uint64_t rq_submit(uint64_t handle) {
     Fences f = {.n = 0, .cap = 32};
     f.p = f.v;
-    prescan(handle, &f, 0);
+    prescan_all(&handle, 1, &f);
     Item it = {.kind = IT_EXEC, .handle = handle};
     uint64_t q = enqueue(&it, f.p, f.n);
     if (f.p != f.v) free(f.p);

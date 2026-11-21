@@ -161,6 +161,7 @@ static void terrain_distance(int world) {
 // what was read or last written; the game's own are kept by address and put back at "Game's". Off:
 // LARECOMP_WORLD_STANDINS=0.
 #include <windows.h>
+#include <immintrin.h>
 int kernel_data_regions(uint64_t *addr, uint64_t *size, int max);
 #define CLOD_VTABLE 0x44a2ed8ull
 #define CLOD_DIST   0x808
@@ -281,6 +282,17 @@ static float pieces_load(uint64_t entity) {
 
 static volatile bool clod_hurry;  // (the game thread: a field is loading - look back to back for a while)
 
+// (clod_thread) Which of the 4 words at p the scan looks at: a word that may be a guest pointer (the settings blocks,
+// the vtables: 0x7_xxxx_xxxx) or one two words before a 32-bit 1 (a settings block's floats). The rest - nearly all of
+// the ~4.6 GB in a town - is passed over 4 words at a time: word by word it was ~0.8 s of a ~1.3 s scan, a core's
+// thread nearly always busy while a field streams in, ~1 fps at World detail 4x. Reads p[0..48).
+__attribute__((target("avx2"))) static inline unsigned clod_block(const uint8_t *p) {
+    __m256i w = _mm256_loadu_si256((const __m256i *)p), w2 = _mm256_loadu_si256((const __m256i *)(p + 16));
+    __m256i ptr = _mm256_cmpeq_epi64(_mm256_srli_epi64(w, 36), _mm256_set1_epi64x(7));
+    __m256i one = _mm256_cmpeq_epi64(_mm256_and_si256(w2, _mm256_set1_epi64x(0xffffffff)), _mm256_set1_epi64x(1));
+    return (unsigned)_mm256_movemask_pd(_mm256_castsi256_pd(_mm256_or_si256(ptr, one)));
+}
+
 static DWORD WINAPI clod_thread(LPVOID unused) {
     (void)unused;
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST);
@@ -296,11 +308,16 @@ static DWORD WINAPI clod_thread(LPVOID unused) {
         Sleep(GetTickCount64() < fast_until ? 250 : 2000);
         int world = rt_sv_world_part("STANDINS"), nr = kernel_data_regions(ra, rs, 1024), nc = 0, ng = 0, ns = 0, no = 0, n = 0;
         uint64_t vt = g_modules[0].base + CLOD_VTABLE, vt_gsg = g_modules[0].base + GSG_VTABLE;
+        bool block = (vt >> 36) == 7 && (vt_gsg >> 36) == 7;  // (clod_block's pointer test covers the vtables)
         for (int r = 0; r < nr; r++)
             for (uint64_t c = ra[r], end = ra[r] + rs[r]; c < end; c += 1 << 20) {
                 SIZE_T want = end - c < sizeof buf ? end - c : sizeof buf, got = 0;
                 if (!ReadProcessMemory(GetCurrentProcess(), (void *)(uintptr_t)c, buf, want, &got) || got < 0x810) continue;
-                for (size_t i = 0; i < (1 << 20) && i + 0x810 <= got; i += 8) {
+                size_t last = got - 0x810 < (1 << 20) - 8 ? got - 0x810 : (1 << 20) - 8;  // (the last word looked at)
+                for (size_t i0 = 0; i0 <= last; i0 += 32)
+                for (unsigned m = block ? clod_block(buf + i0) : 15; m; m &= m - 1) {
+                    size_t i = i0 + 8 * (size_t)__builtin_ctz(m);
+                    if (i > last) break;
                     uint64_t q = *(uint64_t *)(buf + i);
                     int si = (q >> 36) == 7 && !(q & 15) ? set_find(q) : 0;
                     if (si) {  // (an object's +0x6f8: its +0x72c)
