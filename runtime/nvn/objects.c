@@ -1050,7 +1050,11 @@ NVN(nvnQueuePresentTexture) {
         }
         present_pace(w->interval);
         backend_present(HOST(NvnTexture, w->textures[i]));
-        if (i < 8) w->present_seq[i] = renderer_fence_seq();  // (the submission just presented)
+        // (the present just queued: a render queue item with the queue on, as nvnQueueFenceSync's - nvnSyncWait takes
+        // the number as one. The GPU submission number it was got ahead of the items, ~3 submissions a frame to ~2
+        // items: a few minutes in (sooner the faster the game ran) every wait was on the newest frame, untranslated -
+        // the GPU overlap lost, a Violet town at World detail 4x down from 60 to ~42 fps for good)
+        if (i < 8) w->present_seq[i] = rq_on() ? rq_fence_seq() : renderer_fence_seq();
     }
 }
 

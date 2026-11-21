@@ -146,6 +146,18 @@ static void terrain_distance(int world) {
 //   it stops updating them at all (0x7000c3e478) - so the ones made before the settings were scaled, the tiles in at
 //   the field's first load, stayed out past 715 m (the rocks below the peak east of that desert went missing at 4x).
 //   Those are found by their +0x6f8 (a known settings block) and their +0x72c scaled the same.
+//   The settings are shared, though: a medium group's block (715 m) is the one of every house, fence, shop, torch,
+//   waterfall and sound emitter of the field - over 8000 objects at once in a Violet town - and times 4 the game kept
+//   them all past 2.8 km: ~5-8 fps at World detail 4x in a town where nothing of it showed. So the small and medium
+//   groups' blocks (below 1 km) stay the game's, and only the objects the far view is made of point at a private copy
+//   times n (hle_alloc, the block's 0x80 bytes around it, read by the game as its own): the land (ground_*, area*,
+//   cliff_*, the far stand-ins' instances ins_clod*, the world's rocks *_a_w*) and the field's scenes (the terrain
+//   tiles ter_XX_YY, the far land plates plan_ter_XX_YY - the mountains on the horizon - and the towns and cities).
+//   An object is known by its name (a pointer 0x28 before its block pointer, 0x20 for the second of the two a model
+//   component keeps, 0x388 for an object's record, 0x2b8 for a scene) and its kind (a known vtable at a fixed
+//   distance before: no other words that happen to hold a block's address are touched). The large groups' blocks (1.9
+//   km and up: few objects, big ones) are scaled as a whole. A Violet town at 4x: 49-55 -> 59-60 fps, the far
+//   mountains seen from another town as before. LARECOMP_WORLD_OBJECTS=all: every object farther (as before).
 // All of them times n (at 4x the desert south of Mesagoza keeps every cliff and the marked rock is detailed - before,
 // it stayed blurry; that much more drawn costs fps there: 55 at 4x, 58 at 3x, 60 before). A stand-in still never
 // switches past its pieces' group load distance less 160 m (the game's own margin: a 1 km terrain tile's pieces lie that far past its
@@ -280,6 +292,80 @@ static float pieces_load(uint64_t entity) {
          : !strcmp(k, "xxl") ? 6110 : 0;
 }
 
+// The far view's objects (see above): kind and name of the object whose block pointer is at `f`.
+static const struct { uint32_t vt, off; } far_kinds[] = {
+    {0x449f5f0, 0x38}, {0x44a0340, 0xf0}, {0x44a1f38, 0x38}, {0x44a1f38, 0x30}, {0x44a2ba0, 0x38}, {0x44a2ba0, 0x30},
+    {0x44a2158, 0x38}, {0x44a2158, 0x30}, {0x44a2b00, 0x38}, {0x44a2b00, 0x30}, {0x44a1058, 0x310},
+    {0x44a1fd8, 0x38}, {0x44a1fd8, 0x30}, {0x449fc10, 0xd0}, {0x47045d8, 0x18},
+};
+#define SCENES "world/scene/parts/field/unity_output/"
+static const char *const far_names[] = {
+    "ground_", "ins_root_ground_", "ins_clod", "area", "cliff_", "objects_un_a_w", "objects_un_nushi_a_w", "objects_a_w",
+    "ter_", "plan_ter_", SCENES "ter_", SCENES "plan_ter_", SCENES "town_", SCENES "c",
+};
+static bool rpm(uint64_t a, void *to, size_t n) {
+    SIZE_T r = 0;
+    return ReadProcessMemory(GetCurrentProcess(), (void *)(uintptr_t)a, to, n, &r) && r == n;
+}
+static bool far_object_read(uint64_t f, const uint64_t *w) {  // (w: the 0x390 bytes before f, read at once)
+    uint64_t base = g_modules[0].base;
+    bool kind = false;
+    for (size_t i = 0; i < sizeof far_kinds / sizeof far_kinds[0] && !kind; i++)
+        kind = w[(0x390 - far_kinds[i].off) / 8] == base + far_kinds[i].vt;
+    if (!kind) return false;
+    static const int at[4] = {0x28, 0x20, 0x388, 0x2b8};
+    for (int k = 0; k < 4; k++) {
+        char t[48] = {0};
+        uint64_t v = w[(0x390 - at[k]) / 8];
+        if ((v >> 36) != 7 || !rpm(v, t, sizeof t - 1) || !(t[0] >= 'A' && t[0] <= 'z')) continue;
+        for (size_t i = 0; i < sizeof far_names / sizeof far_names[0]; i++)
+            if (!strncmp(t, far_names[i], strlen(far_names[i]))) return true;
+        return false;  // (named: not one of them)
+    }
+    (void)f;
+    return false;
+}
+// Decided before, by the object's address and the two words its kind and first name hang on (a new object there
+// decides again): most of a pass's objects are the same as the last pass's.
+static struct { uint64_t f, k1, k2; bool is_far; } far_seen[65536];
+static bool far_object(uint64_t f) {
+    uint64_t w[0x390 / 8];
+    if (!rpm(f - 0x390, w, sizeof w)) return false;
+    uint64_t k1 = w[(0x390 - 0x38) / 8] ^ w[(0x390 - 0xf0) / 8] ^ w[(0x390 - 0x310) / 8], k2 = w[(0x390 - 0x28) / 8];
+    uint32_t h = (uint32_t)((f >> 3) * 0x9E3779B1u) >> 16;
+    if (far_seen[h].f == f && far_seen[h].k1 == k1 && far_seen[h].k2 == k2) return far_seen[h].is_far;
+    bool r = far_object_read(f, w);
+    far_seen[h].f = f, far_seen[h].k1 = k1, far_seen[h].k2 = k2, far_seen[h].is_far = r;
+    return r;
+}
+// The private copies of the small and medium groups' blocks (by the block's address and its game values), and which
+// object blocks pointed at a copy (by address: they are put back at "Game's").
+typedef struct { uint64_t orig, copy; float game[4]; } FarCopy;
+static FarCopy far_copy[256];
+static int far_ncopy;
+static uint64_t copy_key[512];
+static int copy_val[512];
+static int copy_find(uint64_t a) {
+    for (uint32_t h = (uint32_t)((a >> 4) * 0x9E3779B1u) & 511; copy_key[h]; h = (h + 1) & 511)
+        if (copy_key[h] == a) return copy_val[h];
+    return 0;
+}
+static FarCopy *copy_of(const SetSeen *s, int n) {
+    for (int k = 0; k < far_ncopy; k++)
+        if (far_copy[k].orig == s->at && !memcmp(far_copy[k].game, s->game, 16)) return &far_copy[k];
+    if (far_ncopy >= 256) return NULL;
+    uint8_t *mem = hle_alloc(0x80);
+    if (!rpm(s->at - 0x20, mem, 0x80)) return NULL;  // (the copy stays allocated: hle_alloc's are never freed)
+    FarCopy *c = &far_copy[far_ncopy++];
+    c->orig = s->at, c->copy = (uint64_t)(uintptr_t)(mem + 0x20);
+    memcpy(c->game, s->game, 16);
+    for (int i = 0; i < 4; i++) ((float *)(mem + 0x20))[i] = s->game[i] * (float)n;
+    uint32_t h = (uint32_t)((c->copy >> 4) * 0x9E3779B1u) & 511;
+    while (copy_key[h]) h = (h + 1) & 511;
+    copy_key[h] = c->copy, copy_val[h] = far_ncopy;
+    return c;
+}
+
 static volatile bool clod_hurry;  // (the game thread: a field is loading - look back to back for a while)
 
 // (clod_thread) Which of the 4 words at p the scan looks at: a word that may be a guest pointer (the settings blocks,
@@ -300,13 +386,16 @@ static DWORD WINAPI clod_thread(LPVOID unused) {
     static uint64_t ra[1024], rs[1024];
     static struct { uint64_t at, pair; float load; } cand[8192], grp[1024];
     static struct { uint64_t at; float f[4]; } set[4096];
-    static struct { uint64_t at; float v; int set; } obj[65536];
+    static struct { uint64_t at; float v; int set; } obj[65536], cobj[65536];
     uint64_t fast_until = 0;
     int logged = -1, last_n = -1, nlog = 0;
     for (;;) {
         if (clod_hurry) { clod_hurry = false; fast_until = GetTickCount64() + 20000; }
         Sleep(GetTickCount64() < fast_until ? 250 : 2000);
         int world = rt_sv_world_part("STANDINS"), nr = kernel_data_regions(ra, rs, 1024), nc = 0, ng = 0, ns = 0, no = 0, n = 0;
+        int nco = 0;
+        static int all = -1;  // (LARECOMP_WORLD_OBJECTS=all: every object of the field farther, as before)
+        if (all < 0) all = getenv("LARECOMP_WORLD_OBJECTS") && !strcmp(getenv("LARECOMP_WORLD_OBJECTS"), "all");
         uint64_t vt = g_modules[0].base + CLOD_VTABLE, vt_gsg = g_modules[0].base + GSG_VTABLE;
         bool block = (vt >> 36) == 7 && (vt_gsg >> 36) == 7;  // (clod_block's pointer test covers the vtables)
         for (int r = 0; r < nr; r++)
@@ -319,8 +408,13 @@ static DWORD WINAPI clod_thread(LPVOID unused) {
                     size_t i = i0 + 8 * (size_t)__builtin_ctz(m);
                     if (i > last) break;
                     uint64_t q = *(uint64_t *)(buf + i);
-                    int si = (q >> 36) == 7 && !(q & 15) ? set_find(q) : 0;
-                    if (si) {  // (an object's +0x6f8: its +0x72c)
+                    int si = (q >> 36) == 7 && !(q & 15) ? set_find(q) : 0, ci = si || !far_ncopy ? 0 : copy_find(q);
+                    if (ci) {  // (an object already pointing at a private copy)
+                        if (nco < 65536) {
+                            cobj[nco].at = c + i + 0x34, cobj[nco].set = ci - 1;
+                            memcpy(&cobj[nco++].v, buf + i + 0x34, 4);
+                        }
+                    } else if (si) {  // (an object's +0x6f8: its +0x72c)
                         if (no < 65536) {
                             obj[no].at = c + i + 0x34, obj[no].set = si - 1;
                             memcpy(&obj[no++].v, buf + i + 0x34, 4);
@@ -332,6 +426,7 @@ static DWORD WINAPI clod_thread(LPVOID unused) {
                         if (ng < 1024) grp[ng].at = c + i + GSG_DIST, grp[ng++].pair = *(uint64_t *)(buf + i + GSG_DIST);
                     } else if (*(uint32_t *)(buf + i + 16) == 1 && (q >> 32) > (q & 0xffffffffu) &&
                                (q & 0xffffffffu) >= 0x3f800000u && ns < 4096 &&  // (two rising floats, then ... 1)
+                               !copy_find(c + i) &&  // (not one of the private copies)
                                settings_game(c + i, (const float *)(buf + i))) {
                         set[ns].at = c + i;
                         memcpy(set[ns++].f, buf + i, 16);
@@ -349,11 +444,41 @@ static DWORD WINAPI clod_thread(LPVOID unused) {
         for (int i = 0; i < ns; i++) {
             SetSeen *s = settings_game(set[i].at, set[i].f);
             if (!s) continue;
-            settings_write(s, set[i].f, (float)world);
+            settings_write(s, set[i].f, all || s->game[3] >= 1000 ? (float)world : 1.0f);
             sn++;
         }
         int on = 0;
-        for (int i = 0; i < no; i++) on += object_reach(obj[i].at, obj[i].v, &set_seen[obj[i].set], world);
+        int nfar = 0;
+        for (int i = 0; i < no; i++) {
+            SetSeen *ss = &set_seen[obj[i].set];
+            uint64_t f = obj[i].at - 0x34;
+            int k = world;
+            if (!all && ss->game[3] < 1000) {  // (a small or medium group's: only the far view's objects, on a copy)
+                FarCopy *cp;
+                k = 1;
+                if (world > 1 && far_object(f) && (cp = copy_of(ss, world)) &&
+                    __sync_bool_compare_and_swap((volatile uint64_t *)(uintptr_t)f, ss->at, cp->copy))
+                    k = world, nfar++;
+            }
+            on += object_reach(obj[i].at, obj[i].v, ss, k);
+        }
+        for (int i = 0; i < nco; i++) {  // (on a copy: back on the game's block at "Game's" (or "all"))
+            FarCopy *cp = &far_copy[cobj[i].set];
+            uint64_t f = cobj[i].at - 0x34;
+            SetSeen g = {cp->orig, {0}, {0}};
+            memcpy(g.game, cp->game, 16);
+            if (world > 1 && !all) { on += object_reach(cobj[i].at, cobj[i].v, &g, world); nfar++; continue; }
+            if (__sync_bool_compare_and_swap((volatile uint64_t *)(uintptr_t)f, cp->copy, cp->orig))
+                object_reach(cobj[i].at, cobj[i].v, &g, 1);
+        }
+        for (int k = 0; k < far_ncopy; k++) {  // (the copies follow World detail)
+            volatile float *d = (volatile float *)(uintptr_t)far_copy[k].copy;
+            float m = world > 1 ? (float)world : 1.0f;
+            if (d[3] != far_copy[k].game[3] * m) {
+                if (far_copy[k].game[3] * m >= d[3]) for (int j = 3; j >= 0; j--) d[j] = far_copy[k].game[j] * m;
+                else for (int j = 0; j < 4; j++) d[j] = far_copy[k].game[j] * m;
+            }
+        }
         set_index();  // (the objects' blocks, for the next pass)
         for (int i = 0; i < nc; i++) {
             ClodSeen *s = cand[i].load > 0 ? pair_game(cand[i].at, cand[i].pair, clod_ok) : NULL;
@@ -367,7 +492,7 @@ static DWORD WINAPI clod_thread(LPVOID unused) {
         if ((logged != world || (n != last_n && (n == 0 || last_n <= 0 || n > last_n + last_n / 4 || n < last_n - last_n / 4))) &&
             nlog++ < 40)
             LOG("[npc] world detail: %d of %d far land stand-ins switch farther (up to x%d), with %d field streaming groups "
-                "and %d object streaming settings (%d objects)\n", n, nc, world, gn, sn, on);
+                "and %d object streaming settings (%d objects, %d of the far view)\n", n, nc, world, gn, sn, on, nfar);
         logged = world, last_n = n;
     }
     return 0;
