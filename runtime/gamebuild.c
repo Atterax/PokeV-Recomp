@@ -306,6 +306,12 @@ static const char *const HOT_GIANTS[] = {
     "f_70000064b0", "f_700001ee3c", "f_7000028b70", "f_7000035f20", "f_7000048720", "f_700009f010",
     "f_700012ee50", "f_70002182f0", "f_700021bb80", "f_7000435b10", "f_7000b11660", "f_7000da8320",
     "f_7000e74fb0", "f_7000f15740", "f_7001810840", "f_7001835870", "f_7001b51e18",
+    // Pokémon Scarlet / Violet (PokeV-Recomp; sampled in a town at World detail 4x, where the game's three job threads
+    // limit the frame rate: 24 % of their time was in giants at -O0, 60 % of that in the first three)
+    "f_7000b71428", "f_7000bad638", "f_7000b68be8", "f_7000b99860", "f_700314f92c", "f_700072f248", "f_7002e265b0",
+    "f_7000732990", "f_7000767290", "f_7000c48760", "f_7000765000", "f_7000bc1ee0", "f_7002d87f88", "f_700104e2cc",
+    "f_7002dbd354", "f_7002d85258", "f_7002edebec", "f_7002d7d948", "f_7000fccb5c", "f_7000c0cb38", "f_7002d7af68",
+    "f_7000d6e3a0",
 };
 
 static bool cold_giant(const char *src) {

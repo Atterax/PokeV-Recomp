@@ -468,7 +468,7 @@ static inline void SWU(void) {
 static inline void SWU_ALL(void) { if (sw_mx_depth > 0) { sw_mx_depth = 0; atomic_store_explicit(&sw_mx, 0, memory_order_release); } }
 static __thread jmp_buf *sw_jmp;  // (a worker, inside a draw) where a pass end unwinds to: the draw is the render thread's
 static bool sw_reexec;  // (render thread) taking over a run from a worker's aborted draw: counters were walked already  // (the worker; -1: none)
-static bool sw_walking;  // (render thread) the state-only walk over a run of lists (sw_run): draws skipped
+static __thread bool sw_walking;  // (render thread) the state-only walk over a run of lists (sw_run): draws skipped (per thread: async runs' workers draw while it walks)
 static void sw_slot_reset(int slot);
 
 static Sub *sub(void) {
@@ -1203,6 +1203,7 @@ typedef struct TState {
     bool prim_restart;
     uint32_t restart_index;
     uint64_t copy_row_stride, copy_image_stride;
+    bool raster_discard;  // (SetRasterizerDiscard: state - a pass of Scarlet / Violet sets it before each of its draws)
 } TState;
 // The translation state. The render thread's is st_main; a shadow worker (sw_*) translates its part of a depth-only
 // pass on a copy of it, made at the part's start - st is the calling thread's (st_tls), the render thread's when none.
@@ -1602,7 +1603,8 @@ static uint32_t g_ind_stride_t[NCTX];
 #define g_ind_off (g_ind_off_t[sw_ctx()])
 #define g_ind_stride (g_ind_stride_t[sw_ctx()])
 // Transform feedback state (Begin/EndTransformFeedback, the bound buffers) and rasterizer discard
-static bool xfb_on, raster_discard;
+static bool xfb_on;
+#define raster_discard (st.raster_discard)
 static uint64_t xfb_addr[4], xfb_size[4];
 static uint32_t raw_layer;  // (debug frame: the layer of a layered pass that renderer_save_texture_tex saves)
 
@@ -10180,6 +10182,7 @@ static int sw_list_draws_at(uint64_t handle, const CmdRec **stop) {
         case CMD_SET_VIEWPORTS: case CMD_SET_SCISSORS: case CMD_SET_DEPTH_RANGES: case CMD_SET_BLEND_COLOR: case CMD_SET_STENCIL:
         case CMD_SET_PRIMITIVE_RESTART: case CMD_SET_ALPHA_REF: case CMD_SET_DEPTH_BOUNDS: case CMD_SET_POLYGON_OFFSET:
         case CMD_SET_LINE_WIDTH: case CMD_SET_POINT_SIZE: case CMD_SET_SAMPLE_MASK: case CMD_SET_DEPTH_CLAMP:
+        case CMD_SET_RASTERIZER_DISCARD:
         case CMD_REPORT_COUNTER:  // (its CPU part in the walk, its GPU timestamp in the worker's secondary: exec_list)
             break;
         case CMD_SET_RENDER_TARGETS: {  // (the pass's own targets set again: nothing changes)
@@ -10352,7 +10355,7 @@ static bool sw_async_op_ok(const CmdRec *r) {
     case CMD_COPY_TEXTURE_TO_BUFFER: case CMD_COPY_TEXTURE_TO_TEXTURE: case CMD_DOWNSAMPLE: case CMD_UPDATE_UNIFORM_BUFFER:
     case CMD_FENCE_SYNC: case CMD_REPORT_COUNTER: case CMD_MULTI_DRAW_ARRAYS_INDIRECT_COUNT:
     case CMD_MULTI_DRAW_ELEMENTS_INDIRECT_COUNT: case CMD_BEGIN_XFB: case CMD_END_XFB: case CMD_BIND_XFB_BUFFER:
-    case CMD_BIND_XFB_BUFFERS: case CMD_SET_RASTERIZER_DISCARD: case CMD_DRAW_XFB:
+    case CMD_BIND_XFB_BUFFERS: case CMD_DRAW_XFB:
         return false;
     default:
         return true;  // (state, targets, lists, and what this translation ignores)
@@ -10532,7 +10535,7 @@ static bool sw_walk_op_ok(const CmdRec *r) {
     case CMD_SET_VIEWPORTS: case CMD_SET_SCISSORS: case CMD_SET_DEPTH_RANGES: case CMD_SET_BLEND_COLOR: case CMD_SET_STENCIL:
     case CMD_SET_PRIMITIVE_RESTART: case CMD_SET_ALPHA_REF: case CMD_SET_DEPTH_BOUNDS: case CMD_SET_POLYGON_OFFSET:
     case CMD_SET_LINE_WIDTH: case CMD_SET_POINT_SIZE: case CMD_SET_SAMPLE_MASK: case CMD_SET_DEPTH_CLAMP:
-    case CMD_REPORT_COUNTER:
+    case CMD_SET_RASTERIZER_DISCARD: case CMD_REPORT_COUNTER:
         return true;
     case CMD_SET_RENDER_TARGETS: {
         RtState t;
@@ -10551,6 +10554,9 @@ static struct { NvnTexture *d, *c0, *c1; } sw_cut_pass[SW_CUT_PASSES];
 static int sw_ncut_pass;
 static uint64_t sw_cut_frame = ~0ull;
 static bool sw_pass_cut(void) {
+    // (maintenance7: the pass takes the runs' secondaries and the render thread's draws alike - a run cut around such a
+    // draw costs no pass restart, and one too short is translated here anyway: sw_run's rewind. Not barred then)
+    if (g_vk.maint7) return false;
     uint64_t f = vk_frame_counter();
     if (f != sw_cut_frame) { sw_cut_frame = f; sw_ncut_pass = 0; return false; }
     for (int i = 0; i < sw_ncut_pass; i++)
@@ -10682,8 +10688,9 @@ static void sw_run(const uint64_t *h, uint64_t n, uint64_t first, int depth, int
         st_main = j->tst;
         if (own) st_main.program = &st_main.comp;
         sw_reexec = true;
-        sw_stop = stop;
-        for (uint64_t li = j->abort_li; li < n; li++) exec_list(li == j->abort_li ? (uint64_t)(uintptr_t)j->abort_r : h[li], depth);
+        sw_stop = sw_cut_r ? sw_cut_r : stop;  // (a cut run: up to the cut, where the caller goes on)
+        uint64_t last = sw_cut_r ? sw_cut_li : n - 1;
+        for (uint64_t li = j->abort_li; li <= last && li < n; li++) exec_list(li == j->abort_li ? (uint64_t)(uintptr_t)j->abort_r : h[li], depth);
         sw_stop = NULL;
         sw_reexec = false;
         sw_stat_aborts++;
@@ -11023,7 +11030,7 @@ static void exec_list(uint64_t handle, int depth) {
                 if (setjmp(jb)) { sw_jmp = NULL; SWU_ALL(); sw_abort_r = r; return; }
                 draw(r, r->op == CMD_DRAW_ELEMENTS);
                 sw_jmp = NULL;
-                sw_budget--;
+                if (--sw_budget <= 0) return;  // (its part ends here: what follows is the next part's, or not a run's)
                 break;
             } else if (!sw_no) {  // (this list up to its next record that isn't state or a draw: the shadow workers)
                 int t = sw_tail(r, depth);
@@ -11089,7 +11096,7 @@ static void exec_list(uint64_t handle, int depth) {
                 if (setjmp(jb)) { sw_jmp = NULL; SWU_ALL(); sw_abort_r = r; return; }
                 draw_indirect(r);
                 sw_jmp = NULL;
-                sw_budget--;
+                if (--sw_budget <= 0) return;  // (its part ends here: what follows is the next part's, or not a run's)
                 break;
             } else if (!sw_no) {
                 int t = sw_tail(r, depth);
