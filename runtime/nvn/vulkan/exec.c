@@ -402,7 +402,46 @@ uint64_t vk_cum_exec_ns(void) { return __atomic_load_n(&cum_exec, __ATOMIC_RELAX
 
 // Shadow workers (sw_*, below): on one, the command buffer is its secondary and the pass is the render thread's
 static __thread VkCommandBuffer sw_cb;
-static __thread int sw_id = -1;
+static __thread int sw_id = -1;  // (the worker; -1: none)
+// Per-thread copies of the draw path's caches and per-draw state: index 0 the render thread's, 1 + sw_id a shadow
+// worker's part. The shared state a draw changes (programs and pipelines made, textures' views and uploads, the vertex
+// cache, storage snapshots, aliases...) is changed under sw_mx (SWL / SWU: only on a worker; recursive).
+#define NCTX 9
+static inline int sw_ctx(void) { return sw_cb ? sw_id + 1 : 0; }
+// (a spin lock: held for microseconds, taken several times a draw by every part - a mutex that sleeps made each
+// contended hand-over cost more than the work)
+static _Atomic int sw_mx;
+static __thread int sw_mx_depth;
+static _Atomic uint64_t sw_spin_ns, sw_lock_n;  // (TEMP diag)
+static inline void SWL(void) {
+    if (!sw_cb) return;
+    if (sw_mx_depth++) return;  // (held already: recursive)
+    atomic_fetch_add_explicit(&sw_lock_n, 1, memory_order_relaxed);
+    if (!atomic_exchange_explicit(&sw_mx, 1, memory_order_acquire)) return;
+    uint64_t t0 = SDL_GetTicksNS();
+    for (int k = 0;; k++) {
+        if (!atomic_load_explicit(&sw_mx, memory_order_relaxed) && !atomic_exchange_explicit(&sw_mx, 1, memory_order_acquire)) {
+            atomic_fetch_add_explicit(&sw_spin_ns, SDL_GetTicksNS() - t0, memory_order_relaxed);
+            return;
+        }
+        __builtin_ia32_pause();
+        if ((k & 1023) == 1023) SDL_Delay(0);
+    }
+}
+static _Atomic uint64_t sw_site_n[16384];
+#define SWL_AT(line) do { if (sw_cb) { atomic_fetch_add_explicit(&sw_site_n[(line) & 16383], 1, memory_order_relaxed); \
+    if (!sw_mx_depth) sw_site_cur = (line) & 16383; } SWL(); if (sw_cb && sw_mx_depth == 1) sw_site_t0 = SDL_GetTicksNS(); } while (0)
+static _Atomic uint64_t sw_site_ns[16384];
+static __thread int sw_site_cur;
+static __thread uint64_t sw_site_t0;
+static inline void SWU(void) {
+    if (!sw_cb) return;
+    if (--sw_mx_depth) return;
+    atomic_fetch_add_explicit(&sw_site_ns[sw_site_cur], SDL_GetTicksNS() - sw_site_t0, memory_order_relaxed);
+    atomic_store_explicit(&sw_mx, 0, memory_order_release);
+}
+static inline void SWU_ALL(void) { if (sw_mx_depth > 0) { sw_mx_depth = 0; atomic_store_explicit(&sw_mx, 0, memory_order_release); } }
+static __thread int sw_abort_line;  // (TEMP diag) the pass end that sent a draw back
 static __thread jmp_buf *sw_jmp;  // (a worker, inside a draw) where a pass end unwinds to: the draw is the render thread's
 static bool sw_reexec;  // (render thread) taking over a run from a worker's aborted draw: counters were walked already  // (the worker; -1: none)
 static bool sw_walking;  // (render thread) the state-only walk over a run of lists (sw_run): draws skipped
@@ -783,7 +822,10 @@ VkDescriptorSet vk_alloc_set(VkDescriptorSetLayout layout) {
 #define CHUNK_SIZE (64ull << 20)
 typedef struct { VkBuffer buf; VmaAllocation mem; uint8_t *ptr; uint64_t size, used, seq; } Chunk;
 static Chunk *chunks;
-static int nchunks, active = -1;
+static int nchunks, active_t[NCTX] = {-1, -1, -1, -1, -1, -1, -1, -1, -1};
+#define active (active_t[sw_ctx()])
+static pthread_mutex_t ring_mu = PTHREAD_MUTEX_INITIALIZER;  // (picking / making chunks: shadow workers too)
+static bool chunk_held(int i) { for (int k = 0; k < NCTX; k++) if (active_t[k] == i) return true; return false; }
 
 static int new_chunk(uint64_t size) {
     chunks = realloc(chunks, (nchunks + 1) * sizeof *chunks);
@@ -865,17 +907,18 @@ VkSpan vk_transient(uint64_t size, uint64_t align) {
             return (VkSpan){c->buf, off, c->ptr + off};
         }
     }
+    pthread_mutex_lock(&ring_mu);
     uint64_t done = vk_completed_seq();
     int pick = -1;
     for (int i = 0; i < nchunks; i++)
-        if (i != active && chunks[i].seq <= done && chunks[i].size >= size) { pick = i; break; }
+        if (!chunk_held(i) && chunks[i].seq <= done && chunks[i].size >= size) { pick = i; break; }
     if (pick < 0) pick = new_chunk(size > CHUNK_SIZE ? size : CHUNK_SIZE);
     if (pick < 0) {  // no memory for another chunk (a GTX 1060 with 6 GB: issue #45): wait for the work already submitted,
         // which frees the chunks only it used, and take one of those (the recording in progress keeps its own)
         vk_wait_seq(submit_seq);
         done = vk_completed_seq();
         for (int i = 0; i < nchunks; i++)
-            if (i != active && chunks[i].seq <= done && chunks[i].size >= size) { pick = i; break; }
+            if (!chunk_held(i) && chunks[i].seq <= done && chunks[i].size >= size) { pick = i; break; }
         if (pick < 0) FATAL("the graphics card ran out of memory for uploads (%llu MB needed, %d chunks in use)\n",
                             (unsigned long long)(size >> 20), nchunks);
         static int nlog;
@@ -884,6 +927,7 @@ VkSpan vk_transient(uint64_t size, uint64_t align) {
     active = pick;
     chunks[pick].used = size;
     chunks[pick].seq = pending;
+    pthread_mutex_unlock(&ring_mu);
     stat_upload_bytes += size;
     return (VkSpan){chunks[pick].buf, 0, chunks[pick].ptr};
 }
@@ -919,7 +963,8 @@ VkSpan vk_transient_copy(const void *data, uint64_t size, uint64_t align) {
 // while it's identical, within one submission. slot: one per kind of data.
 enum { DEDUPE_RSCALE_V, DEDUPE_RSCALE_F, DEDUPE_TINT, DEDUPE_SLOTS };  // (the driver constants: cbuf_info)
 static VkSpan copy_dedupe(int slot, const void *data, uint64_t size, uint64_t align) {
-    static struct { uint64_t seq, size; uint8_t data[0x800]; VkSpan span; } last[DEDUPE_SLOTS];
+    static struct { uint64_t seq, size; uint8_t data[0x800]; VkSpan span; } last_t[NCTX][DEDUPE_SLOTS];
+    __typeof__(last_t[0][0]) *last = last_t[sw_ctx()];
     uint64_t seq = vk_pending_seq();
     if (size > sizeof last[0].data) return vk_transient_copy(data, size, align);
     if (last[slot].seq == seq && last[slot].size == size && !memcmp(last[slot].data, data, size)) return last[slot].span;
@@ -930,7 +975,8 @@ static VkSpan copy_dedupe(int slot, const void *data, uint64_t size, uint64_t al
 
 // Guest memory copied once per submission: draws binding the same range share the copy.
 #define GCOPY_TAB 4096
-static struct { uint64_t addr, size, seq; VkSpan span; uint64_t scanned; } gcopy[GCOPY_TAB];  // (scanned: heap size then, 0 not)
+static struct { uint64_t addr, size, seq; VkSpan span; uint64_t scanned; } gcopy_t[NCTX][GCOPY_TAB];  // (scanned: heap size then, 0 not)
+#define gcopy (gcopy_t[sw_ctx()])
 static uint64_t gcopy_gen;  // bumped to drop every shared copy (guest memory written mid-list)
 static void guest_copy_flush(void) { gcopy_gen++; }
 // scan: (lazy heap chunks, a uniform buffer of a shader with global memory) the range is also scanned for heap
@@ -945,7 +991,7 @@ static VkSpan guest_copy_ex(uint64_t addr, uint64_t size, bool scan) {
     uint64_t heap = 0;
     if (scan) {
         heap = gmem_heap_size();
-        if ((!hit || gcopy[slot].scanned != heap) && gc_scan_needed()) gc_scan_pointers((const uint32_t *)(uintptr_t)addr, size);
+        if ((!hit || gcopy[slot].scanned != heap) && gc_scan_needed()) { SWL_AT(987); gc_scan_pointers((const uint32_t *)(uintptr_t)addr, size); SWU(); }
         else prof_scan_skipped++;
     }
     if (hit) {
@@ -1495,19 +1541,30 @@ void renderer_texture_mark_presented(NvnTexture *t);
 uint64_t renderer_present_count(void);
 void renderer_save_texture_tex(TexBackend *b, const char *path);
 static float pass_sx = 1, pass_sy = 1;
-static float vp_sx = 1, vp_sy = 1, vp_ox = 0, vp_oy = 0;
-static float tex_sc[2][64][2];
-static float tex_fr[2][64][2];  // per bound texture slot: the part of the texture the contents occupy (Dynamic)
-static uint32_t tex_wh[2][64][2];
+static struct { float sx, sy, ox, oy; } vp_t[NCTX] = {{1, 1, 0, 0}, {1, 1, 0, 0}, {1, 1, 0, 0}, {1, 1, 0, 0}, {1, 1, 0, 0},
+                                                       {1, 1, 0, 0}, {1, 1, 0, 0}, {1, 1, 0, 0}, {1, 1, 0, 0}};
+#define vp_sx (vp_t[sw_ctx()].sx)
+#define vp_sy (vp_t[sw_ctx()].sy)
+#define vp_ox (vp_t[sw_ctx()].ox)
+#define vp_oy (vp_t[sw_ctx()].oy)
+static float tex_sc_t[NCTX][2][64][2];
+static float tex_fr_t[NCTX][2][64][2];  // per bound texture slot: the part of the texture the contents occupy (Dynamic)
+static uint32_t tex_wh_t[NCTX][2][64][2];
+#define tex_sc (tex_sc_t[sw_ctx()])
+#define tex_fr (tex_fr_t[sw_ctx()])
+#define tex_wh (tex_wh_t[sw_ctx()])
 
 // ================================================================== render passes
 static VkFormat pass_color[8], pass_depth, pass_stencil;
 static uint32_t pass_ncolor, pass_samples = 1, pass_w, pass_h, pass_layers = 1;
 static int debug_pass_no;
 // (draw_indirect) the draw being made reads its parameters on the GPU: offset in the guest memory window's buffer
-static bool g_ind_gpu;
-static VkDeviceSize g_ind_off;
-static uint32_t g_ind_stride;
+static bool g_ind_gpu_t[NCTX];
+static VkDeviceSize g_ind_off_t[NCTX];
+static uint32_t g_ind_stride_t[NCTX];
+#define g_ind_gpu (g_ind_gpu_t[sw_ctx()])
+#define g_ind_off (g_ind_off_t[sw_ctx()])
+#define g_ind_stride (g_ind_stride_t[sw_ctx()])
 // Transform feedback state (Begin/EndTransformFeedback, the bound buffers) and rasterizer discard
 static bool xfb_on, raster_discard;
 static uint64_t xfb_addr[4], xfb_size[4];
@@ -1572,7 +1629,7 @@ void vk_end_pass(void) { vk_end_pass_at(0); }
 #define vk_end_pass() vk_end_pass_at(__LINE__)
 static void vk_end_pass_at(int line) {
     if (sw_cb) {  // (a shadow worker can't end the render thread's pass: the draw goes back to it - sw_run)
-        if (sw_jmp) longjmp(*sw_jmp, 1);
+        if (sw_jmp) { sw_abort_line = line; longjmp(*sw_jmp, 1); }
         static int n;
         if (n++ < 10) LOG("[sw] a shadow worker asked to end the pass outside a draw (line %d): ignored\n", line);
         return;
@@ -1634,6 +1691,8 @@ static void gtao_apply_pending(void);
 static void water_apply_pending(void);
 static void gtao_forget(NvnTexture *t);  // (vk_exec_texture_destroyed: the AO and water passes' saved targets)
 static bool pass_secondary;  // (sw_run) the next pass's contents are secondary command buffers
+static bool sw_enabled(void);
+static bool pass_mixed;  // (maintenance7, shadow workers on) the pass takes both: runs need no restart
 static void begin_pass(void) {
     if (sw_cb) return;  // (a shadow worker draws inside the render thread's pass)
     if (in_pass && !st.rt_dirty) return;
@@ -1799,7 +1858,7 @@ static void begin_pass(void) {
     pass_w = minw; pass_h = minh;
     pass_layers = layers == UINT32_MAX ? 1 : layers;
     VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, {minw, minh}}, .layerCount = pass_layers,
-                          .flags = pass_secondary ? VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT : 0,
+                          .flags = pass_secondary ? VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT | (g_vk.maint7 ? VK_RENDERING_CONTENTS_INLINE_BIT_KHR : 0) : 0,
                           .colorAttachmentCount = pass_ncolor, .pColorAttachments = pass_ncolor ? ca : NULL,
                           .pDepthAttachment = has_d ? &da : NULL, .pStencilAttachment = has_s ? &sa : NULL};
     // LARECOMP_VK_LOG_PASSES=<n> (default 300 with =1): each of the first n passes before it begins - an Intel crash
@@ -1829,6 +1888,9 @@ static void begin_pass(void) {
         else LOG(", no depth / stencil");
         LOG(", samples %u\n", pass_samples);
     }
+    if (!pass_secondary && g_vk.maint7 && sw_enabled())
+        ri.flags = VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT | VK_RENDERING_CONTENTS_INLINE_BIT_KHR;
+    pass_mixed = (ri.flags & VK_RENDERING_CONTENTS_INLINE_BIT_KHR) != 0;
     rec_CmdBeginRendering(cb, &ri);
     ss_forget();  // (whatever ran between the passes may have set its own state)
     in_pass = true;
@@ -2095,7 +2157,8 @@ typedef struct {
     ShaderFp fp[2];             // (stale-program detector, shader_prep.h; compute: [0]; touched by the replay only)
     struct PipeMemo *pmemo;     // (render thread) draw_'s pipeline key memo for this program
     bool reuse;                 // set reuse (stage_set): some uniform buffers are dynamic, sets are kept while their contents repeat
-    struct SetCache *scache[2]; // (render thread) stage_set's last set per set index
+    struct SetCache *scache[9][2]; // stage_set's last set per set index, per context (exec.c NCTX: the render thread's and
+                                   // each shadow worker part's - from its own pools)
 } Prog;
 
 // ---- descriptor set reuse (graphics programs; port of vk-draw-cpu-2 d50bbce)
@@ -2482,7 +2545,9 @@ static bool key_memo_on(void) {
 
 static Prog *get_program_(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey);
 static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
-    static struct { uint64_t code[2], fp[2]; ShaderKey vkey; uint8_t rt[8]; uint32_t gen; Prog *prog; } m;
+    static struct { uint64_t code[2], fp[2]; ShaderKey vkey; uint8_t rt[8]; uint32_t gen; Prog *prog; } m_t[NCTX][64];
+    // (64 a context, by code address: the shadow workers' parts switch programs across draws of different objects)
+#define m (m_t[sw_ctx()][(np->stages[0].code_addr >> 6 ^ np->stages[1].code_addr >> 4 ^ np->stages[1].code_addr >> 13) & 63])
     bool on = key_memo_on();
     // (the code fingerprints too: other code at the same address is another program - code_fp)
     uint64_t fp0 = code_fp(&np->stages[0]), fp1 = code_fp(&np->stages[1]);
@@ -2492,12 +2557,15 @@ static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
         prof_prog_memo++;
         return m.prog;
     }
+    SWL_AT(2551);  // (shadow workers: the program table)
     Prog *p = get_program_(np, vkey, fkey);
+    SWU();
     if (on && p) {
         m.code[0] = np->stages[0].code_addr; m.code[1] = np->stages[1].code_addr; m.fp[0] = fp0; m.fp[1] = fp1;
         m.vkey = *vkey; memcpy(m.rt, fkey->rt_kind, 8); m.gen = key_gen; m.prog = p;
     }
     return p;
+#undef m
 }
 
 static Prog *get_program_(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
@@ -3027,11 +3095,16 @@ static void set_vertex_input(VkCommandBuffer cb, const VtxLayout *l) {
 }
 
 // ================================================================== feedback snapshots (renderer.m resolve_feedback)
-static NvnTexture *feedback_tex[4];
-static VkImageView feedback_view[4];
-static TexBackend *feedback_img[4];  // (the snapshot behind each view: a slot in stencil mode takes its own view of it)
-static int nfeedback;
-static uint64_t g_cur_fs_hash;
+static NvnTexture *feedback_tex_t[NCTX][4];
+static VkImageView feedback_view_t[NCTX][4];
+static TexBackend *feedback_img_t[NCTX][4];  // (the snapshot behind each view: a slot in stencil mode takes its own view of it)
+static int nfeedback_t[NCTX];
+#define feedback_tex (feedback_tex_t[sw_ctx()])
+#define feedback_view (feedback_view_t[sw_ctx()])
+#define feedback_img (feedback_img_t[sw_ctx()])
+#define nfeedback (nfeedback_t[sw_ctx()])
+static uint64_t g_cur_fs_hash_t[NCTX];
+#define g_cur_fs_hash (g_cur_fs_hash_t[sw_ctx()])
 static NvnTexture *snap_tex[8];
 static bool snap_ok[8];
 static const char *snap_why[8];
@@ -3369,7 +3442,7 @@ void vk_exec_texture_destroyed(NvnTexture *t) {
     for (int i = 0; i < 8; i++) if (st.rt.color[i] == t) st.rt.color[i] = NULL, rt = true;
     if (st.rt.depth == t) st.rt.depth = NULL, rt = true;
     if (rt) st.rt_dirty = true;  // (an open pass keeps its views: they are destroyed once the GPU is done)
-    for (int i = 0; i < 4; i++) if (feedback_tex[i] == t) feedback_tex[i] = NULL;
+    for (int c = 0; c < NCTX; c++) for (int i = 0; i < 4; i++) if (feedback_tex_t[c][i] == t) feedback_tex_t[c][i] = NULL;
     snapshots_invalidate(t);
     for (int i = 0; i < 8; i++) if (snap_tex[i] == t) snap_tex[i] = NULL;
     for (int i = 0; i < nsnaps; i++) if (snaps[i].key == t) snaps[i].key = NULL;
@@ -3382,6 +3455,7 @@ void vk_alias_reset(void) { naliases = 0; }  // (reboot: every texture goes)
 
 // ---- FSR 2 (fsr2_frame): the scene camera per frame - the view-projection in vertex constant buffer 5 of the
 // G-buffer draws (4+ colour targets) - and their depth target.
+static void mv_note_draw_(uint64_t f);
 static void mv_note_draw(Prog *pr) {
     extern uint64_t vk_frame_counter(void);
     uint64_t f = vk_frame_counter();
@@ -3391,6 +3465,12 @@ static void mv_note_draw(Prog *pr) {
     // position is cb5[0..3] (rows) x their model matrix, cb10)
     if (mv_frame[0] == f || !st.rt.depth || !st.ubuf[0][2].addr || st.ubuf[0][2].size < 64) return;
     if (n < 4) return;
+    SWL_AT(3459);  // (shadow workers: the frame's camera, once)
+    mv_note_draw_(f);
+    SWU();
+}
+static void mv_note_draw_(uint64_t f) {
+    if (mv_frame[0] == f) return;
     const float *m = (const float *)(uintptr_t)st.ubuf[0][2].addr;
     for (int i = 0; i < 16; i++) if (!isfinite(m[i])) return;
     if (m[12] == 0 && m[13] == 0 && m[14] == 0) return;  // (perspective: w depends on the position)
@@ -3415,7 +3495,14 @@ void vk_alias_stats(void) {
 }
 
 // draws: attachments written (or a destination bound at all) end the aliases involved
+static void alias_draw_check_(void);
 static void alias_draw_check(void) {
+    if (!naliases) return;
+    SWL_AT(3492);
+    alias_draw_check_();
+    SWU();
+}
+static void alias_draw_check_(void) {
     if (!naliases) return;
     for (int i = 0; i < st.rt.ncolor; i++)
         if (st.rt.color[i]) alias_before_write(st.rt.color[i], 0, "color target");
@@ -3427,7 +3514,19 @@ static void alias_draw_check(void) {
     if (writes || is_dst) alias_before_write(d, 0, writes ? "depth write" : "dst bound");
 }
 
+static void resolve_feedback_(Prog *pr);
 static void resolve_feedback(Prog *pr) {
+    nfeedback = 0;
+    bool any = false;  // (an attachment sampled: rare - the snapshots are shared)
+    ShaderInfo *in2[2] = {pr->vi, pr->fi};
+    for (int sg = 0; sg < 2 && !any; sg++)
+        for (int i = 0; i < in2[sg]->ntex && !any; i++) any = is_attachment(shader_texture_object(sg, &in2[sg]->tex[i]));
+    if (!any) return;
+    SWL_AT(3516);
+    resolve_feedback_(pr);
+    SWU();
+}
+static void resolve_feedback_(Prog *pr) {
     nfeedback = 0;
     static int off = -1;
     if (off < 0) off = ENV("LARECOMP_NO_FEEDBACK") != NULL;
@@ -3514,7 +3613,8 @@ static bool cbuf_lean(void) {
 }
 // The scale table of a graphics stage: rows 0..nt and 65 of rs are set, the rows between are zero (not read from rs).
 static VkSpan rscale_dedupe(int sg, const float rs[66][4], int nt) {
-    static struct { uint64_t seq; int nt; float r[66][4]; VkSpan span; } last[2];
+    static struct { uint64_t seq; int nt; float r[66][4]; VkSpan span; } last_t[NCTX][2];
+    __typeof__(last_t[0][0]) *last = last_t[sw_ctx()];
     uint64_t seq = vk_pending_seq();
     size_t used = (size_t)(nt + 1) * 16;
     if (last[sg].seq == seq && last[sg].nt == nt && !memcmp(last[sg].r, rs, used) && !memcmp(last[sg].r[65], rs[65], 16)) {
@@ -3576,8 +3676,10 @@ static int snap_half;              // the half being filled
 static uint64_t snap_half_seq[2];  // the submission pending when each half was last left (its copies may be in use until then)
 static uint32_t snap_gen = 1;      // (bumped at a half switch: older copies are never bound again)
 static uint32_t rs_level_gen = 1;
-static Range sb_eff[6][16];        // the current draw's / dispatch's storage table with the copies' addresses (snap_apply)
-static bool sb_eff_on;
+static Range sb_eff_t[NCTX][6][16];        // the current draw's / dispatch's storage table with the copies' addresses (snap_apply)
+#define sb_eff (sb_eff_t[sw_ctx()])
+static bool sb_eff_on_t[NCTX];
+#define sb_eff_on (sb_eff_on_t[sw_ctx()])
 static inline const Range *sbufs(int stage) { return sb_eff_on ? sb_eff[stage] : st.sbuf[stage]; }
 
 static uint64_t range_hash(uint64_t addr, uint64_t size) {
@@ -3960,7 +4062,14 @@ static void bind_note(int kind, uint64_t addr, uint64_t size) {
 // bound slot): the stage's effective storage table, with the copies' addresses where a range is snapshotted. Every
 // reader of the table in the draw / dispatch (drv_dedupe, cbuf_info, gmem_direct_pick, gmem_chunk_bind, gfast_prepare,
 // vc_mark_sbufs) takes sbufs(stage); st.sbuf itself keeps the game's bindings (rehashed next frame).
+static void snap_apply_(int stage, uint32_t read_mask);
 static void snap_apply(int stage, uint32_t read_mask) {
+    if (!read_mask) { snap_apply_(stage, 0); return; }  // (per context only)
+    SWL_AT(4059);
+    snap_apply_(stage, read_mask);
+    SWU();
+}
+static void snap_apply_(int stage, uint32_t read_mask) {
     bool on = snap_on();
     for (int i = 0; i < 16; i++)
         if (st.sbuf[stage][i].addr && ((read_mask >> i) & 1)) bind_note(stage == 5 ? 3 : 2, st.sbuf[stage][i].addr, st.sbuf[stage][i].size);
@@ -3983,7 +4092,8 @@ static void snap_apply(int stage, uint32_t read_mask) {
 // The driver constants of a graphics stage (cbuf 0, size bytes): zero but for the stage's storage buffer table at
 // base (16 bytes an entry: address low, high, size). Compared by the entries within size.
 static VkSpan drv_dedupe(int stage, uint64_t size) {
-    static struct { uint64_t seq, size; int stage; Range sb[16]; VkSpan span; } last[2];
+    static struct { uint64_t seq, size; int stage; Range sb[16]; VkSpan span; } last_t[NCTX][2];
+    __typeof__(last_t[0][0]) *last = last_t[sw_ctx()];
     int slot = stage == 1;
     uint32_t base = 0x110 + 0x100 * (stage == 1 ? 4 : 0);
     int ne = size > base ? (int)((size - base + 15) / 16) : 0;
@@ -4030,7 +4140,8 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
             for (int i = 0; i < 16; i++) key.ub[i][0] = st.ubuf[5][i].addr, key.ub[i][1] = st.ubuf[5][i].size;
             key.g[0] = gx, key.g[1] = gy, key.g[2] = gz;
         }
-        static struct { uint64_t seq; __typeof__(key) key; VkSpan span; } last[3];
+        static struct { uint64_t seq; __typeof__(key) key; VkSpan span; } last_t[NCTX][3];
+        __typeof__(last_t[0][0]) *last = last_t[sw_ctx()];
         int slot = stage == 5 ? 2 : stage == 1 ? 1 : 0;
         uint64_t seq = vk_pending_seq();
         if (last[slot].seq == seq && !memcmp(&last[slot].key, &key, sizeof key)) return ubo_span(last[slot].span, size);
@@ -5787,7 +5898,48 @@ void vc_flush(void) {
 // index: an index buffer. Never read from the transform feedback mirror: transform feedback writes vertex data only, the mirror has no INDEX_BUFFER usage (the validation
 // layer: vkCmdBindIndexBuffer on it, 423 times in 15 s), and index data the game wrote into the arena's memory after a session (chunks count as written by 256-byte
 // chunk) was read from stale mirror bytes: invisible walls and empty text boxes.
-static bool guest_direct(int kind, uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceSize *off) {  // kind: 0 vertex, 1 index (bind_note)
+static bool guest_direct_(int kind, uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceSize *off);
+static bool guest_direct(int kind, uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceSize *off) {
+    if (!sw_cb) return guest_direct_(kind, addr, size, buf, off);
+    // (a shadow worker: the same range again in this submission - the answer it had, without the lock. An entry the
+    // submission drew from isn't dropped during it - vcache_lookup; GPU-written pages change vc_epoch; the mirror's
+    // chunks change between frames only)
+    static struct { uint64_t addr, size, seq, frame; VkBuffer buf; VkDeviceSize off; uint32_t epoch; uint8_t kind, ok; } memo_t[NCTX][1024];
+    uint64_t seq = vk_pending_seq(), frame = vk_frame_counter();
+    uint32_t ep = vc_epoch;
+    __typeof__(memo_t[0][0]) *e = &memo_t[sw_ctx()][(addr >> 6 ^ addr >> 17 ^ size * 0x9E37u ^ (uint64_t)kind) & 1023];
+    if (e->addr == addr && e->size == size && e->kind == kind && e->seq == seq && e->frame == frame && e->epoch == ep) {
+        *buf = e->buf; *off = e->off;
+        return e->ok;
+    }
+    // (another part's answer for this range in this submission, read without the lock: seqlock)
+    static struct { _Atomic uint32_t sq; uint64_t addr, size, seq, frame; VkBuffer buf; VkDeviceSize off; uint32_t epoch; uint8_t kind, ok; } sh[4096];
+    uint32_t si = (uint32_t)((addr >> 6 ^ addr >> 19 ^ size * 0x9E37u ^ (uint64_t)kind) & 4095);
+    uint32_t s1 = atomic_load_explicit(&sh[si].sq, memory_order_acquire);
+    if (!(s1 & 1) && sh[si].addr == addr && sh[si].size == size && sh[si].kind == kind && sh[si].seq == seq && sh[si].frame == frame &&
+        sh[si].epoch == ep) {
+        VkBuffer b = sh[si].buf;
+        VkDeviceSize o = sh[si].off;
+        bool ok = sh[si].ok;
+        atomic_thread_fence(memory_order_acquire);
+        if (atomic_load_explicit(&sh[si].sq, memory_order_relaxed) == s1) {
+            *buf = b; *off = o;
+            *e = (__typeof__(*e)){addr, size, seq, frame, b, o, ep, (uint8_t)kind, ok};
+            return ok;
+        }
+    }
+    SWL_AT(5894);
+    bool r = guest_direct_(kind, addr, size, buf, off);
+    atomic_fetch_add_explicit(&sh[si].sq, 1, memory_order_relaxed);
+    atomic_thread_fence(memory_order_release);
+    sh[si].addr = addr; sh[si].size = size; sh[si].seq = seq; sh[si].frame = frame; sh[si].buf = r ? *buf : VK_NULL_HANDLE;
+    sh[si].off = r ? *off : 0; sh[si].epoch = ep; sh[si].kind = (uint8_t)kind; sh[si].ok = r;
+    atomic_fetch_add_explicit(&sh[si].sq, 1, memory_order_release);
+    SWU();
+    *e = (__typeof__(*e)){addr, size, seq, frame, r ? *buf : VK_NULL_HANDLE, r ? *off : 0, ep, (uint8_t)kind, r};
+    return r;
+}
+static bool guest_direct_(int kind, uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceSize *off) {  // kind: 0 vertex, 1 index (bind_note)
     static int copy = -1;
     if (copy < 0) copy = getenv("LARECOMP_VK_COPY_VERTICES") != NULL;
     if (copy || addr < gwin_base) return false;
@@ -5932,14 +6084,40 @@ static void texture_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo
             extern uint64_t vk_frame_counter(void);
             static int nomemo = -1;
             if (nomemo < 0) nomemo = ENV("LARECOMP_VK_NO_TEX_MEMO") != NULL;
-            static struct { NvnTexture *tex; uint64_t vh, frame; uint32_t gen; uint8_t type, has_view; VkImageView view; } memo[1024];
+            static struct { NvnTexture *tex; uint64_t vh, frame; uint32_t gen; uint8_t type, has_view; VkImageView view; } memo_t[NCTX][1024];
+            __typeof__(memo_t[0][0]) *memo = memo_t[sw_ctx()];
             uint64_t vh = e->has_view ? hash_words(0, &e->view, sizeof e->view) : 0, frame = vk_frame_counter();
             uint32_t ms = (uint32_t)((((uintptr_t)e->tex >> 4) ^ vh ^ (uint64_t)st_->type * 0x9E3779B97F4A7C15ull) & 1023);
             if (!nomemo && memo[ms].tex == e->tex && memo[ms].vh == vh && memo[ms].frame == frame && memo[ms].gen == vk_view_gen &&
                 memo[ms].type == st_->type && memo[ms].has_view == e->has_view) {
                 view = memo[ms].view;
             } else {
-                view = vk_view(naliases ? alias_read(e->tex) : e->tex, &e->view, e->has_view, false, st_->type);
+                // (shadow workers: what another part looked up this frame - a texture's first lookup of the frame,
+                // with its upload check, made once; read without the lock: seqlock)
+                static struct { _Atomic uint32_t seq; NvnTexture *tex; uint64_t vh, frame; uint32_t gen; uint8_t type, has_view; VkImageView view; } sh[4096];
+                bool got = false;
+                uint32_t si = (uint32_t)((((uintptr_t)e->tex >> 4) ^ vh ^ (uint64_t)st_->type * 0x9E3779B97F4A7C15ull) & 4095);
+                if (sw_cb && !nomemo) {
+                    uint32_t s1 = atomic_load_explicit(&sh[si].seq, memory_order_acquire);
+                    if (!(s1 & 1) && sh[si].tex == e->tex && sh[si].vh == vh && sh[si].frame == frame && sh[si].gen == vk_view_gen &&
+                        sh[si].type == st_->type && sh[si].has_view == e->has_view) {
+                        VkImageView v = sh[si].view;
+                        atomic_thread_fence(memory_order_acquire);
+                        if (atomic_load_explicit(&sh[si].seq, memory_order_relaxed) == s1) view = v, got = true;
+                    }
+                }
+                if (!got) {
+                    SWL_AT(6052);
+                    view = vk_view(naliases ? alias_read(e->tex) : e->tex, &e->view, e->has_view, false, st_->type);
+                    if (sw_cb) {
+                        atomic_fetch_add_explicit(&sh[si].seq, 1, memory_order_relaxed);
+                        atomic_thread_fence(memory_order_release);
+                        sh[si].tex = e->tex; sh[si].vh = vh; sh[si].frame = frame; sh[si].gen = vk_view_gen;
+                        sh[si].type = (uint8_t)st_->type; sh[si].has_view = e->has_view; sh[si].view = view;
+                        atomic_fetch_add_explicit(&sh[si].seq, 1, memory_order_release);
+                    }
+                    SWU();
+                }
                 memo[ms].tex = e->tex; memo[ms].vh = vh; memo[ms].frame = frame; memo[ms].gen = vk_view_gen;
                 memo[ms].type = (uint8_t)st_->type; memo[ms].has_view = e->has_view; memo[ms].view = view;
             }
@@ -6030,7 +6208,8 @@ static void texture_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo
 // Writes the descriptor set of one stage. gx..gz: compute group counts (driver constants).
 // pre_ii: texture descriptors already resolved by the caller (draw: fragment textures, needed earlier for the
 // viewport decision), or NULL.
-static float g_mirror_w;  // mirror mode's composite: its render target width (rscale[65].x; 0 otherwise)
+static float g_mirror_w_t[NCTX];  // mirror mode's composite: its render target width (rscale[65].x; 0 otherwise)
+#define g_mirror_w (g_mirror_w_t[sw_ctx()])
 
 // (set reuse) what a set holds, one entry per descriptor written, in stage_set's order (fixed per program)
 typedef struct { uint32_t binding, type; uint64_t a, b, c; } SetEnt;
@@ -6089,8 +6268,10 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
             bi[n] = cbuf_info(stage, si, (int)b->binding, gx, gy, gz);
             w[n].pBufferInfo = &bi[n];
         } else if (b->type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) {
+            SWL_AT(6205);
             bi[n] = b->binding == GFAST_BUFFER_INDEX ? gfast_info()
                   : b->binding == XFB_BUFFER_INDEX && xm_draw ? (VkDescriptorBufferInfo){xm_buf, 0, XM_SIZE} : gmem_info();
+            SWU();
             w[n].pBufferInfo = &bi[n];
         } else {
             continue;  // rscale / tint: written below, once the textures (and their scales) are known
@@ -6134,9 +6315,10 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
     extern uint32_t vk_view_gen;
     SetCache *c = NULL;
     SetEnt e[MAX_BIND];
-    if (p->reuse && set < 2 && !sw_cb) {  // the same contents as this program's last set of this index: bind that one again
-        if (!p->scache[set]) p->scache[set] = calloc(1, sizeof *p->scache[set]);
-        c = p->scache[set];
+    if (p->reuse && set < 2) {  // the same contents as this program's last set of this index: bind that one again
+        struct SetCache **cs = &p->scache[sw_ctx()][set];
+        if (!*cs) *cs = calloc(1, sizeof **cs);  // (each context its own: no other thread writes it)
+        c = *cs;
         memset(e, 0, (size_t)n * sizeof e[0]);  // (padding: compared with memcmp)
         for (int i = 0; i < n; i++) {
             e[i].binding = w[i].dstBinding;
@@ -6694,11 +6876,13 @@ static uint32_t stencil_slots(int stage, uint32_t *sint) {
     // recomputed every texture's at its first use each frame, 2.5 % of the render thread)
     extern _Atomic uint32_t g_pool_gen;
     uint32_t gen = atomic_load_explicit(&g_pool_gen, memory_order_relaxed);
-    static struct { const NvnDescPool *pool; uint32_t tic, gen; int kind; } memo[16384];
+    static struct { const NvnDescPool *pool; uint32_t tic, gen; int kind; } memo_t[NCTX][16384];
+    __typeof__(memo_t[0][0]) *memo = memo_t[sw_ctx()];
     // Only the slots whose binding changed since the stage's draw before (same pool, its entries unchanged): a draw changes
     // one or two textures if any, and going through all 32 each time - an entry and its memo line each - was 5 % of the
     // render thread in a town at World detail 4x (~11 000 calls a frame)
-    static struct { uint64_t tex[32]; const NvnDescPool *pool; uint32_t gen, m, sint; } last[2];
+    static struct { uint64_t tex[32]; const NvnDescPool *pool; uint32_t gen, m, sint; } last_t[NCTX][2];
+    __typeof__(last_t[0][0]) *last = last_t[sw_ctx()];
     int ls = stage ? 1 : 0;
     __typeof__(last[0]) *L = &last[ls];
     if (nomemo || L->pool != st.tpool || L->gen != gen) {
@@ -6947,8 +7131,15 @@ static bool blended(void) {
     }
     return n > 0;
 }
+static bool wait_built_(_Atomic int *state, const CmdRec *r, bool indexed, bool pipe);
 static bool wait_built(_Atomic int *state, const CmdRec *r, bool indexed, bool pipe) {
     if (atomic_load(state) == 1) return true;
+    SWL_AT(7070);  // (shadow workers: the waits' tables)
+    bool ok = wait_built_(state, r, indexed, pipe);
+    SWU();
+    return ok;
+}
+static bool wait_built_(_Atomic int *state, const CmdRec *r, bool indexed, bool pipe) {
     static int wait_all = -1;  // LARECOMP_VK_WAIT_ALL_SMALL=1: every draw of up to 6 vertices waits, as before
     if (wait_all < 0) wait_all = ENV("LARECOMP_VK_WAIT_ALL_SMALL") != NULL;
     if (r->x[2] > 6 || (!wait_all && (blended() || scene_quad(r)))) return wait_scene(state);
@@ -7098,12 +7289,16 @@ static void draw_(CmdRec *r, bool indexed) {
     snap_apply(0, pr->vi->ssbo_read);  // (overlap) the storage slots the shaders read: a copy where the CPU rewrites the range
     snap_apply(1, pr->fi->ssbo_read);
     {   // fragment-shader hash: interior backdrop detection (widescreen), skip lists, item twinkle (renderer.m)
-        static uint64_t last_fs, last_hash;
+        static uint64_t last_fs_t[NCTX], last_hash_t[NCTX];
+        uint64_t *lfs = &last_fs_t[sw_ctx()], *lh = &last_hash_t[sw_ctx()];
+#define last_fs (*lfs)
+#define last_hash (*lh)
         uint64_t fs = st.program->stages[1].code_addr;
         if (fs != last_fs) {
             // (once a frame per shader: a town at World detail 4x switches fragment shader on most of its ~5600 draws,
             // and hashing 512 bytes each time was 2.5 % of the render thread)
-            static struct { uint64_t fs, hash, frame; } memo[512];
+            static struct { uint64_t fs, hash, frame; } memo_t[NCTX][512];
+            __typeof__(memo_t[0][0]) *memo = memo_t[sw_ctx()];
             uint64_t f = vk_frame_counter() + 1;
             __typeof__(memo[0]) *e = &memo[(fs >> 6 ^ fs >> 15) & 511];
             last_fs = fs;
@@ -7127,9 +7322,11 @@ static void draw_(CmdRec *r, bool indexed) {
         if (last_hash == 0xa2177dbb72197bd9ull && pot_level_active()) { SKIP(SK_HIDDEN); return; }
         if (g_debug_frame && getenv("LARECOMP_LOG_FSHASH")) LOG("[fshash] fs=%llx hash %016llx\n", (unsigned long long)fs, (unsigned long long)last_hash);
         g_cur_fs_hash = last_hash;
+#undef last_fs
+#undef last_hash
         extern void widescreen_backdrop_seen(uint64_t hash);
-        if (last_hash) widescreen_backdrop_seen(last_hash);
         extern void widescreen_scene_ubo(const float *u, uint64_t size);  // (the camera's view-projection)
+        if (g_cur_fs_hash) widescreen_backdrop_seen(g_cur_fs_hash);  // (no lock: rare writes of one frame number / camera)
         if (st.ubuf[0][5].addr) widescreen_scene_ubo((const float *)(uintptr_t)st.ubuf[0][5].addr, st.ubuf[0][5].size);
     }
     mv_note_draw(pr);
@@ -7181,8 +7378,13 @@ static void draw_(CmdRec *r, bool indexed) {
     FixedState fx;
     fixed_state(&fx, vkey.flip_x, vkey.flip_y, native, topo);
     bool memo_on = key_memo_on() && !g_vkc.no_eds1;  // (no extended dynamic state: the whole fixed state is in the key)
-    if (memo_on && !pr->pmemo) pr->pmemo = calloc(1, sizeof *pr->pmemo);
-    struct PipeMemo *pm = memo_on ? pr->pmemo : NULL;
+    struct PipeMemo *pms = memo_on ? __atomic_load_n(&pr->pmemo, __ATOMIC_ACQUIRE) : NULL;
+    if (memo_on && !pms) {  // (one per context: the shadow workers' parts draw with the same programs at once)
+        SWL_AT(7318);
+        if (!(pms = pr->pmemo)) { pms = calloc(NCTX, sizeof *pms); __atomic_store_n(&pr->pmemo, pms, __ATOMIC_RELEASE); }
+        SWU();
+    }
+    struct PipeMemo *pm = memo_on ? &pms[sw_ctx()] : NULL;
     int nat = st.nattrib < 0 ? 0 : st.nattrib > 16 ? 16 : st.nattrib, nst = st.nstream < 0 ? 0 : st.nstream > 16 ? 16 : st.nstream;
     uint32_t npc = pass_ncolor < 8 ? pass_ncolor : 8;
     prof_key_draws++;
@@ -7205,6 +7407,7 @@ static void draw_(CmdRec *r, bool indexed) {
         if (g_vkc.no_eds1) k.fx = fx;
         uint64_t ph = hash_words(0xcbf29ce484222325ull, &k, sizeof k);
         if (!ph) ph = 1;
+        SWL_AT(7345);  // (shadow workers: the pipeline table)
         KvEnt *pslot = kv_find(&pipe_kv, ph);
         pp = pslot->val;
         if (!pp) {
@@ -7231,6 +7434,7 @@ static void draw_(CmdRec *r, bool indexed) {
             }
             kv_set(&pipe_kv, pslot, ph, pp);
         }
+        SWU();
         if (pm) {
             pm->gen = key_gen; pm->ncolor = pass_ncolor; pm->samples = pass_samples; pm->depth = pass_depth; pm->stencil = pass_stencil;
             pm->nattrib = st.nattrib; pm->nstream = st.nstream; pm->channel_mask = in.channel_mask; pm->blend_on = in.blend_on;
@@ -7427,7 +7631,7 @@ static void draw_(CmdRec *r, bool indexed) {
     } else if (fabsf(pass_sx - pass_sy) > 0.01f * pass_sy && st.rt.ncolor && st.ubuf[0][0].addr) {
         // HUD layout panes and font text drawn into a reshaped intermediate composite target: centred 16:9 box.
         extern bool widescreen_ui_boxed_draw(const float *u, uint64_t size, int ntex,
-                                             const float (*tex_sc)[2], const uint32_t (*tex_wh)[2]);
+                                             const float (*sc_)[2], const uint32_t (*wh_)[2]);
         const float *u = (const float *)(uintptr_t)st.ubuf[0][0].addr;
         int ntex = pr->fi->ntex < 64 ? pr->fi->ntex : 64;
         bool boxed = widescreen_ui_boxed_draw(u, st.ubuf[0][0].size, ntex, tex_sc[1], tex_wh[1]);
@@ -7830,7 +8034,8 @@ static bool ib_overrun(CmdRec *r, const uint32_t *p, uint64_t pa) {
     // (the largest index, once a frame per index range: a mesh is drawn into each shadow cascade and the scene, and
     // scanning its indices each time was 2.8 % of the render thread in a town at World detail 4x. The game writes
     // a frame's indices before submitting it)
-    static struct { uint64_t at, count, frame; uint32_t isz, restart, mx; } memo[4096];
+    static struct { uint64_t at, count, frame; uint32_t isz, restart, mx; } memo_t[NCTX][4096];
+    __typeof__(memo_t[0][0]) *memo = memo_t[sw_ctx()];
     uint64_t at = (uint64_t)(uintptr_t)ip, frame = vk_frame_counter() + 1;
     __typeof__(memo[0]) *c = &memo[(at >> 4 ^ at >> 17 ^ count * 0x9E37u) & 4095];
     if (c->at == at && c->count == count && c->frame == frame && c->isz == isz && c->restart == restart) mx = c->mx;
@@ -9039,9 +9244,16 @@ static NvnTexEntry *gtao_tex_entry(ShaderInfo *si, int i) {
 // Ambient occlusion, Indirect light and Water reflections did nothing. The camera rows are the same in both
 // (cb5[12..15] the inverse view-projection, cb5[19] the camera's position).
 static int gtao_depth_i = 1;  // (the last lighting variant matched: its depth texture's index)
+static bool gtao_is_lighting_(Prog *pr);
 static bool gtao_is_lighting(Prog *pr) {
     if (g_cur_fs_hash == GTAO_LIGHTING) return gtao_depth_i = 1, true;
     if (!(gtao_on() || ssgi_on() || water_on()) || !pr || !pr->fi || pr->fi->ntex < 10 || !st.program) return false;
+    SWL_AT(9186);
+    bool r = gtao_is_lighting_(pr);
+    SWU();
+    return r;
+}
+static bool gtao_is_lighting_(Prog *pr) {
     static uint64_t known[64]; static int8_t verdict[64]; static int nk;  // (verdict: the depth's index, -1 = not lighting)
     uint64_t fs = st.program->stages[1].code_addr;
     for (int i = 0; i < nk; i++)
@@ -9654,6 +9866,7 @@ typedef struct {
     const uint64_t *h;
     const CmdRec *stop;
     const CmdRec *abort_r;  // (the worker) the draw it gave back, in list abort_li; its state then is tst
+    int abort_line;
     uint64_t abort_li;
     uint64_t li, ln, p;
     int budget, depth;
@@ -9668,7 +9881,8 @@ static uint64_t sw_gen;
 static int sw_left;
 static uint64_t sw_stop_ops[64], sw_why[4];  // (TEMP diag: what ended runs; why sw_try said no)
 static struct { VkCommandPool pool; VkCommandBuffer *cbs; int n, cap, next; } sw_pools[SW_MAX][VK_SUBS];
-static uint64_t sw_stat_runs, sw_stat_draws, sw_stat_aborts;  // (logged every 600 frames: sw_run)
+static uint64_t sw_stat_runs, sw_stat_draws, sw_stat_aborts, sw_stat_cuts;  // (logged every 600 frames: sw_run)
+static uint64_t sw_stat_walk_ns, sw_stat_wait_ns, sw_stat_redo_ns, sw_stat_abort_line[8];  // (TEMP diag)
 static __thread int sw_budget;  // (a worker) draws left in its part
 static __thread const CmdRec *sw_abort_r;  // (a worker) the draw it gave back (exec_list)
 static __thread const CmdRec *sw_stop;  // (a worker, and the walk) the run ends at this record (NULL: its lists' ends)
@@ -9748,7 +9962,9 @@ static void sw_slot_reset(int slot) {
 }
 
 // a part, on the thread that runs it (a worker, or the render thread for part 0)
+static uint64_t sw_part_ns[SW_MAX];  // (TEMP diag)
 static void sw_chunk(int w, SwJob *j) {
+    uint64_t tc0 = SDL_GetTicksNS();
     st_tls = &j->tst;
     ss_tls = &j->tss;
     memset(&j->tss, 0, sizeof j->tss);
@@ -9765,23 +9981,22 @@ static void sw_chunk(int w, SwJob *j) {
     VK_CHECK(vkBeginCommandBuffer(j->cb, &bi));
     extern void rec_worker_enter(int w, VkCommandBuffer cb), rec_worker_leave(void);
     rec_worker_enter(w, j->cb);
-    pthread_mutex_lock(&sw_big);  // (phase 1: the draw path isn't thread-safe yet - one part at a time)
     sw_budget = j->budget;
     sw_stop = j->stop;
     j->abort_r = NULL;
     for (uint64_t i = j->li; i < j->ln && sw_budget > 0 && !j->abort_r; i++) {
         sw_abort_r = NULL;
         exec_list(i == j->li ? j->p : j->h[i], j->depth);
-        if (sw_abort_r) j->abort_r = sw_abort_r, j->abort_li = i;
+        if (sw_abort_r) j->abort_r = sw_abort_r, j->abort_li = i, j->abort_line = sw_abort_line;
     }
     sw_stop = NULL;
-    pthread_mutex_unlock(&sw_big);
     rec_worker_leave();
     VK_CHECK(vkEndCommandBuffer(j->cb));
     sw_cb = VK_NULL_HANDLE;
     sw_id = -1;
     st_tls = NULL;
     ss_tls = NULL;
+    sw_part_ns[w] += SDL_GetTicksNS() - tc0;
 }
 
 #include "../../platform.h"
@@ -9822,6 +10037,39 @@ static bool sw_enabled(void) {
 }
 
 // (the walk) a draw: the next part begins after it once enough came before
+// (the walk) a draw the render thread must make itself: one whose program samples an attachment of the pass (its
+// snapshot ends the pass - resolve_feedback), or a copy alias over one of the attachments (alias_draw_check). The run
+// ends before it (sw_cut_*); it and what follows go on as usual. (A texture bound to such a draw is only a hint: the
+// pass's own shadow map stays bound across its draws - the program's own textures decide, as in resolve_feedback.)
+static const CmdRec *sw_cut_r;
+static uint64_t sw_cut_li;
+static bool sw_walk_risky(void) {
+    for (int i = 0; i < naliases; i++) if (is_attachment(aliases[i].src) || is_attachment(aliases[i].dst)) return true;
+    if (!st.tpool || !st.program) return false;
+    bool any = false;
+    for (int sg = 0; sg < 2 && !any; sg++)
+        for (int k = 0; k < 32 && !any; k++) {
+            uint64_t h = st.tex[sg][k];
+            uint32_t tic = h & 0xFFFFF;
+            any = h && tic < (uint32_t)st.tpool->count && is_attachment(((NvnTexEntry *)st.tpool->entries)[tic].tex);
+        }
+    if (!any) return false;
+    ShaderKey vkey = {0}, fkey = {0};  // (the program, as draw_ finds it)
+    vkey.glsl = fkey.glsl = 1;
+    vkey.flip_y = fkey.flip_y = nvn_window_origin() == 0;
+    vkey.depth_minus_one = nvn_depth_mode() == 0;
+    for (int i = 0; i < st.nattrib; i++) vkey.attr_kind[i] = (uint8_t)attr_kind(st.attrib[i] & 0xFF);
+    for (int i = 0; i < st.rt.ncolor; i++) if (st.rt.color[i]) fkey.rt_kind[i] = (uint8_t)rt_kind(st.rt.color[i]->format);
+    vkey.stencil_slots = stencil_slots(0, &vkey.sint_slots);
+    fkey.stencil_slots = stencil_slots(1, &fkey.sint_slots);
+    Prog *pr = get_program(st.program, &vkey, &fkey);
+    if (!pr || atomic_load(&pr->state) != 1 || !pr->vi || !pr->fi) return true;  // (not known yet: the render thread's)
+    ShaderInfo *infos[2] = {pr->vi, pr->fi};
+    for (int sg = 0; sg < 2; sg++)
+        for (int i = 0; i < infos[sg]->ntex; i++)
+            if (is_attachment(shader_texture_object(sg, &infos[sg]->tex[i]))) return true;
+    return false;
+}
 static void sw_walk_draw(const CmdRec *r) {
     sw_walk_count++;
     if (sw_walk_k + 1 < sw_walk_parts && sw_walk_count == sw_walk_bound[sw_walk_k + 1]) {
@@ -9833,12 +10081,33 @@ static void sw_walk_draw(const CmdRec *r) {
     }
 }
 
+// Passes cut this frame (a draw of the render thread's in them - feedback): no more runs in them this frame (their
+// draws one by one on the render thread: a run around each of many such draws cost more than it gave)
+#define SW_CUT_PASSES 16
+static struct { NvnTexture *d, *c0, *c1; } sw_cut_pass[SW_CUT_PASSES];
+static int sw_ncut_pass;
+static uint64_t sw_cut_frame = ~0ull;
+static bool sw_pass_cut(void) {
+    uint64_t f = vk_frame_counter();
+    if (f != sw_cut_frame) { sw_cut_frame = f; sw_ncut_pass = 0; return false; }
+    for (int i = 0; i < sw_ncut_pass; i++)
+        if (sw_cut_pass[i].d == st.rt.depth && sw_cut_pass[i].c0 == (st.rt.ncolor > 0 ? st.rt.color[0] : NULL) &&
+            sw_cut_pass[i].c1 == (st.rt.ncolor > 1 ? st.rt.color[1] : NULL))
+            return true;
+    return false;
+}
+static void sw_pass_cut_note(void) {
+    if (sw_ncut_pass < SW_CUT_PASSES)
+        sw_cut_pass[sw_ncut_pass++] = (__typeof__(sw_cut_pass[0])){st.rt.depth, st.rt.ncolor > 0 ? st.rt.color[0] : NULL,
+                                                                     st.rt.ncolor > 1 ? st.rt.color[1] : NULL};
+}
 static bool sw_pass_ok(void) {  // (the render thread) a depth-only pass, no transform feedback session open
     if (sw_cb || sw_walking || sw_reexec || !sw_enabled()) return false;
     if (xfb_on) { sw_why[0]++; return false; }
     // (not into the window's image: the composites, widescreen boxes, mirror mode and HDR snapshots draw_ makes there
     // are the render thread's)
     for (int c = 0; c < st.rt.ncolor; c++) if (st.rt.color[c] && renderer_texture_presented(st.rt.color[c])) return false;
+    if (sw_pass_cut()) return false;
     static int mode = -1;  // (TEMP bisect) LARECOMP_SW_MODE=1: only passes whose colour slot 0 is empty (shadow maps)
     if (mode < 0) mode = getenv("LARECOMP_SW_MODE") ? atoi(getenv("LARECOMP_SW_MODE")) : 0;
     if (mode == 1 && st.rt.ncolor && st.rt.color[0]) return false;
@@ -9852,10 +10121,13 @@ static bool sw_pass_ok(void) {  // (the render thread) a depth-only pass, no tra
 static void sw_run(const uint64_t *h, uint64_t n, uint64_t first, int depth, int draws, const CmdRec *stop) {
     // the pass, its contents secondary command buffers (a pass already begun inline ends: its contents are kept)
     xm_flush_back();
-    vk_end_pass();
-    pass_secondary = true;
-    begin_pass();
-    pass_secondary = false;
+    begin_pass();  // (the pass, if not begun yet - with maintenance7 it takes the secondaries along with inline draws)
+    if (!pass_mixed) {  // (else one of secondaries only: the pass begun inline ends, its contents kept)
+        vk_end_pass();
+        pass_secondary = true;
+        begin_pass();
+        pass_secondary = false;
+    }
     int parts = sw_n + 1;
     if (parts > draws / 16) parts = draws / 16 > 1 ? draws / 16 : 1;
     { static int fp = -1; if (fp < 0) fp = getenv("LARECOMP_SW_PARTS") ? atoi(getenv("LARECOMP_SW_PARTS")) : 0; if (fp > 0 && parts > fp) parts = fp; }  // (TEMP bisect)
@@ -9868,9 +10140,12 @@ static void sw_run(const uint64_t *h, uint64_t n, uint64_t first, int depth, int
     if (st.program == &st_main.comp) j0->tst.program = &j0->tst.comp;
     j0->li = 0;
     j0->p = first;
+    uint64_t tw0 = SDL_GetTicksNS();
     sw_walking = true;
     sw_stop = stop;
-    for (uint64_t li = 0; li < n; li++) { sw_walk_li = li; exec_list(li ? h[li] : first, depth); }
+    sw_cut_r = NULL;
+    for (uint64_t li = 0; li < n && !sw_cut_r; li++) { sw_walk_li = li; exec_list(li ? h[li] : first, depth); }
+    sw_stat_walk_ns += SDL_GetTicksNS() - tw0;
     sw_stop = NULL;
     sw_walking = false;
     for (int k = 0; k < parts; k++) {
@@ -9878,7 +10153,8 @@ static void sw_run(const uint64_t *h, uint64_t n, uint64_t first, int depth, int
         j->h = h;
         j->ln = n;
         j->depth = depth;
-        j->budget = k <= sw_walk_k ? sw_walk_bound[k + 1] - sw_walk_bound[k] : 0;
+        int to = sw_walk_bound[k + 1] < sw_walk_count ? sw_walk_bound[k + 1] : sw_walk_count;  // (a cut: the draws walked)
+        j->budget = k <= sw_walk_k && to > sw_walk_bound[k] ? to - sw_walk_bound[k] : 0;
         j->stop = stop;
         j->cb = sw_secondary(k);
     }
@@ -9894,19 +10170,23 @@ static void sw_run(const uint64_t *h, uint64_t n, uint64_t first, int depth, int
     pthread_cond_broadcast(&sw_go);
     pthread_mutex_unlock(&sw_mu);
     sw_chunk(0, &sw_jobs[0]);  // (part 0 on the render thread, on its copy: st_main stays at the run's end)
+    uint64_t tq0 = SDL_GetTicksNS();
     pthread_mutex_lock(&sw_mu);
     while (sw_left) pthread_cond_wait(&sw_done, &sw_mu);
     pthread_mutex_unlock(&sw_mu);
 parts_done:;
+    sw_stat_wait_ns += SDL_GetTicksNS() - tq0;
     int ab = -1;  // (the first part that gave a draw back: the parts after it are dropped, it takes over from that draw)
     for (int k = 0; k < parts && ab < 0; k++) if (sw_jobs[k].budget && sw_jobs[k].abort_r) ab = k;
     VkCommandBuffer cbs[SW_MAX];
     int ncb = 0;
     for (int k = 0; k < parts && (ab < 0 || k <= ab); k++) if (sw_jobs[k].budget) cbs[ncb++] = sw_jobs[k].cb;
     if (ncb) rec_CmdExecuteCommands(vk_cmd(), (uint32_t)ncb, cbs);
-    vk_end_pass();  // (a pass of secondaries takes nothing else: the next draw begins an inline one)
-    ss_forget();
+    if (!pass_mixed) vk_end_pass();  // (a pass of secondaries takes nothing else: the next draw begins an inline one)
+    ss_forget();  // (the secondaries left the dynamic state undefined)
     if (ab >= 0) {
+        uint64_t tr0 = SDL_GetTicksNS();
+        { int L = sw_jobs[ab].abort_line; sw_stat_abort_line[L == 3227 ? 0 : L == 3470 ? 1 : 2]++; if (L != 3227 && L != 3470) { static int nl; if (nl++ < 5) LOG("[sw] abort at line %d\n", L); } }
         SwJob *j = &sw_jobs[ab];
         bool own = j->tst.program == &j->tst.comp;
         st_main = j->tst;
@@ -9917,9 +10197,11 @@ parts_done:;
         sw_stop = NULL;
         sw_reexec = false;
         sw_stat_aborts++;
+        sw_stat_redo_ns += SDL_GetTicksNS() - tr0;
     }
     sw_stat_runs++;
-    sw_stat_draws += (uint64_t)draws;
+    sw_stat_draws += (uint64_t)sw_walk_count;
+    if (sw_cut_r) { sw_stat_cuts++; sw_pass_cut_note(); }
     {
         static uint64_t last;
         uint64_t f = vk_frame_counter();
@@ -9927,7 +10209,20 @@ parts_done:;
         if (f >= last + 600) {
             LOG("[sw] %.1f runs, %.0f draws a frame to the shadow workers (%d parts), %.2f runs a frame taken back\n",
                 sw_stat_runs / (double)(f - last), sw_stat_draws / (double)(f - last), parts, sw_stat_aborts / (double)(f - last));
-            sw_stat_aborts = 0;
+            LOG("[sw] per frame: walk %.2f ms, waiting for the workers %.2f ms, taken back %.2f ms (aborts by line: 3227 %llu, 3470 %llu, other %llu)\n",
+                sw_stat_walk_ns / 1e6 / (double)(f - last), sw_stat_wait_ns / 1e6 / (double)(f - last), sw_stat_redo_ns / 1e6 / (double)(f - last),
+                (unsigned long long)sw_stat_abort_line[0], (unsigned long long)sw_stat_abort_line[1], (unsigned long long)sw_stat_abort_line[2]);
+            LOG("[sw] per frame: parts %.2f %.2f %.2f %.2f ms; lock taken %.0f times, %.2f ms spinning (all threads)\n",
+                sw_part_ns[0] / 1e6 / (double)(f - last), sw_part_ns[1] / 1e6 / (double)(f - last), sw_part_ns[2] / 1e6 / (double)(f - last),
+                sw_part_ns[3] / 1e6 / (double)(f - last), atomic_load(&sw_lock_n) / (double)(f - last), atomic_load(&sw_spin_ns) / 1e6 / (double)(f - last));
+            memset(sw_part_ns, 0, sizeof sw_part_ns); atomic_store(&sw_lock_n, 0); atomic_store(&sw_spin_ns, 0);
+            LOG("[sw] lock sites a frame:");
+            for (int k = 0; k < 16384; k++) { uint64_t v = atomic_exchange(&sw_site_n[k], 0), t = atomic_exchange(&sw_site_ns[k], 0);
+                if (v / (f - last)) LOG(" %d:%llu(%.2fms)", k, (unsigned long long)(v / (f - last)), t / 1e6 / (double)(f - last)); }
+            LOG("\n");
+            sw_stat_walk_ns = sw_stat_wait_ns = sw_stat_redo_ns = 0; memset(sw_stat_abort_line, 0, sizeof sw_stat_abort_line);
+            LOG("[sw] %.2f runs a frame cut before a draw of the render thread's\n", sw_stat_cuts / (double)(f - last));
+            sw_stat_aborts = sw_stat_cuts = 0;
             LOG("[sw] refused: xfb %llu, few draws %llu (first list not ok %llu); stops:", (unsigned long long)sw_why[0],
                 (unsigned long long)sw_why[1], (unsigned long long)sw_why[2]);
             for (int k = 0; k < 64; k++) if (sw_stop_ops[k]) LOG(" op%d:%llu", k, (unsigned long long)sw_stop_ops[k]);
@@ -9951,21 +10246,30 @@ static uint64_t sw_try(const uint64_t *h, uint64_t i, uint64_t n, int depth) {
     }
     if (draws < SW_MIN_DRAWS) { sw_why[1]++; if (m == 0) sw_why[2]++; return 0; }
     sw_run(h + i, m, h[i], depth + 1, draws, NULL);
+    if (sw_cut_r) {  // (the rest of that list here - its draws may make a run again - and the CALL goes on after it)
+        const CmdRec *c = sw_cut_r;
+        uint64_t li = sw_cut_li;
+        sw_cut_r = NULL;
+        exec_list((uint64_t)(uintptr_t)c, depth + 1);
+        return li + 1;
+    }
     return m;
 }
 
 // (a draw in a list) the list from record r up to its first record that isn't state or a draw (or its end): true - done,
 // the render thread goes on at sw_tail_stop (NULL: the list's end)
-static bool sw_tail(const CmdRec *r, int depth) {
-    if (!sw_pass_ok()) return false;
+static int sw_tail(const CmdRec *r, int depth) {  // 1: done; 0: not in this list; -1: not this draw (the next may)
+    if (!sw_pass_ok()) return 0;
+    if (sw_walk_risky()) { sw_pass_cut_note(); return 0; }  // (this draw is the render thread's, and so is the pass this frame)
     const CmdRec *stop;
     int draws = sw_list_draws_at((uint64_t)(uintptr_t)r, &stop);
-    if (draws < SW_MIN_DRAWS) return false;
+    if (draws < SW_MIN_DRAWS) return 0;
     static uint64_t one[1];
     one[0] = (uint64_t)(uintptr_t)r;
     sw_run(one, 1, one[0], depth, draws, stop);
-    sw_tail_stop = stop;
-    return true;
+    sw_tail_stop = sw_cut_r ? sw_cut_r : stop;  // (cut: the render thread goes on at that draw)
+    sw_cut_r = NULL;
+    return 1;
 }
 
 // ================================================================== executor (renderer.m exec_list)
@@ -10180,19 +10484,24 @@ static void exec_list(uint64_t handle, int depth) {
             break;
         case CMD_DISPATCH: dispatch_compute((uint32_t)r->x[0], (uint32_t)r->x[1], (uint32_t)r->x[2]); break;
         case CMD_DRAW_ARRAYS: case CMD_DRAW_ELEMENTS:
-            if (sw_walking) { sw_walk_draw(r); break; }
+            if (sw_walking) {
+                if (sw_walk_risky()) { sw_cut_r = r; sw_cut_li = sw_walk_li; return; }  // (the run ends before it)
+                sw_walk_draw(r);
+                break;
+            }
             if (sw_cb) {  // (a worker: its part ends at its last draw; a draw that needs the render thread goes back)
                 if (sw_budget <= 0) return;
                 jmp_buf jb;
                 sw_jmp = &jb;
-                if (setjmp(jb)) { sw_jmp = NULL; sw_abort_r = r; return; }
+                if (setjmp(jb)) { sw_jmp = NULL; SWU_ALL(); sw_abort_r = r; return; }
                 draw(r, r->op == CMD_DRAW_ELEMENTS);
                 sw_jmp = NULL;
                 sw_budget--;
                 break;
             } else if (!sw_no) {  // (this list up to its next record that isn't state or a draw: the shadow workers)
-                if (sw_tail(r, depth)) { if (!sw_tail_stop) return; p = (uint64_t)(uintptr_t)sw_tail_stop; continue; }
-                sw_no = true;
+                int t = sw_tail(r, depth);
+                if (t > 0) { if (!sw_tail_stop) return; p = (uint64_t)(uintptr_t)sw_tail_stop; continue; }
+                if (!t) sw_no = true;
             }
             draw(r, r->op == CMD_DRAW_ELEMENTS);
             break;
@@ -10241,19 +10550,24 @@ static void exec_list(uint64_t handle, int depth) {
             break;
         }
         case CMD_DRAW_ARRAYS_INDIRECT: case CMD_DRAW_ELEMENTS_INDIRECT:
-            if (sw_walking) { sw_walk_draw(r); break; }
+            if (sw_walking) {
+                if (sw_walk_risky()) { sw_cut_r = r; sw_cut_li = sw_walk_li; return; }
+                sw_walk_draw(r);
+                break;
+            }
             if (sw_cb) {
                 if (sw_budget <= 0) return;
                 jmp_buf jb;
                 sw_jmp = &jb;
-                if (setjmp(jb)) { sw_jmp = NULL; sw_abort_r = r; return; }
+                if (setjmp(jb)) { sw_jmp = NULL; SWU_ALL(); sw_abort_r = r; return; }
                 draw_indirect(r);
                 sw_jmp = NULL;
                 sw_budget--;
                 break;
             } else if (!sw_no) {
-                if (sw_tail(r, depth)) { if (!sw_tail_stop) return; p = (uint64_t)(uintptr_t)sw_tail_stop; continue; }
-                sw_no = true;
+                int t = sw_tail(r, depth);
+                if (t > 0) { if (!sw_tail_stop) return; p = (uint64_t)(uintptr_t)sw_tail_stop; continue; }
+                if (!t) sw_no = true;
             }
             draw_indirect(r);
             break;
