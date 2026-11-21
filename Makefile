@@ -110,7 +110,7 @@ IMGUI_OBJ += $(B)/imgui/imgui_impl_vulkan.o
 UIFLAGS  := -x c++ $(OSFLAGS)  # the .mm UI sources are plain C++ apart from __APPLE__ blocks
 GAMELIB  := $(B)/lasgame.dll
 # the runtime functions it calls: exported by the .exe, linked through its import library
-LDFLAGS  += -Wl,--export-all-symbols -Wl,--out-implib,$(B)/PokeV-Recomp.dll.a
+LDFLAGS  += -Wl,--export-all-symbols -Wl,--out-implib,$(B)/PokeV-Recomp.dll.a $(LDEXTRA)
 GAMELIB_LDFLAGS := -shared -fuse-ld=lld $(B)/PokeV-Recomp.dll.a
 GAMELIB_SHARED := -shared  # (+ the import library: runtime/gamebuild.c)
 endif
@@ -133,7 +133,11 @@ GAMELIB_BASE_ID := $(shell (cat $(GAMELIB_BASE_SRCS); echo '$(GENFLAGS) $(GAMELI
                      (shasum -a 256 2>/dev/null || sha256sum) | cut -c1-16)
 
 RT_OBJ   := $(patsubst runtime/%.cpp,$(B)/rt/%.o,$(patsubst runtime/%.c,$(B)/rt/%.o,$(RT_SRC)))
-RTFLAGS  := -O2 -g -fno-strict-aliasing -Wall -Wno-unused-function -Iruntime -Iruntime/nvn $(DEPINC) $(OSFLAGS)
+# RTEXTRA / LDEXTRA: more flags for the runtime and its link - a profile-guided build, e.g. RTEXTRA="-flto=thin
+# -fprofile-instr-use=<file> -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date" LDEXTRA=-flto=thin, from a run of
+# an RTEXTRA=-fprofile-instr-generate build with LARECOMP_PGO_DUMP_AT=<frame> (llvm-profdata merge): ~6 % less render
+# thread per draw in a Scarlet / Violet town at World detail 4x
+RTFLAGS  := -O2 -g -fno-strict-aliasing -Wall -Wno-unused-function -Iruntime -Iruntime/nvn $(DEPINC) $(OSFLAGS) $(RTEXTRA)
 CXXFLAGS := -O2 -g -std=c++17 -I$(IMGUI) -I$(IMGUI)/backends -Iruntime -Iruntime/nvn $(DEPINC)
 
 all: $(EXE) $(if $(GEN_SRC),$(GAMELIB))

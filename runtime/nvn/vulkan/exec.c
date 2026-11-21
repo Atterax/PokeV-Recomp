@@ -11536,7 +11536,19 @@ void backend_execute(uint64_t handle) { execute_one(handle, true); }
 // before), after LARECOMP_VK_BATCH_DRAWS draws if set (it was 400 by default, so the GPU started on the frame while the
 // rest was translated; the render passes' chunks do that now - begin_pass - and each submission's vertex cache queries
 // and ring slot cost Scarlet / Violet's ~5700-draw town frames 2.3 fps: 40.2 -> 42.5 without it), and with the call. LARECOMP_VK_SUBMIT_EACH=1: one submission per list, as before.
+// (profile-guided builds: make RTEXTRA=-fprofile-instr-generate) LARECOMP_PGO_DUMP_AT=<frame>: the profile written then
+// (a test run ends with the process killed, before the instrumentation's own write at exit)
+extern int __llvm_profile_write_file(void) __attribute__((weak));
+static void pgo_dump_check(void) {
+    static long at = -2;
+    if (at == -2) at = getenv("LARECOMP_PGO_DUMP_AT") ? atol(getenv("LARECOMP_PGO_DUMP_AT")) : -1;
+    if (at < 0 || !__llvm_profile_write_file || (long)vk_frame_counter() < at) return;
+    at = -1;
+    int r = __llvm_profile_write_file();
+    LOG("[pgo] profile written (%d)\n", r);
+}
 void backend_execute_batch(const uint64_t *handles, int n) {
+    pgo_dump_check();
     static int each = -1;
     if (each < 0) each = ENV("LARECOMP_VK_SUBMIT_EACH") != NULL;
     for (int i = 0; i < n; i++) execute_one(handles[i], each || i == n - 1);
