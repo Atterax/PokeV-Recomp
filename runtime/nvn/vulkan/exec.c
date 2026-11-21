@@ -5765,10 +5765,19 @@ static void gfast_finish(VkCommandBuffer cb) {
 #define VC_TAB 8192                   // entries (open addressing)
 #define VC_MAX_RANGE (64ull << 20)    // larger bound ranges: read in place
 #define VC_BUDGET (768ull << 20)      // device-local bytes kept; the least recently used go first
-typedef struct { uint64_t lo, hi, used_seq; uint32_t gen, epoch, gpu_until; VkBuffer buf; VmaAllocation mem; bool gpu; } VcEnt;
+// sq: odd while the lock's holder changes the entry (vc_quick reads it without the lock); used_seq is claimed for the
+// submission by compare-and-swap (~0: being dropped); vc_npend grows atomically
+typedef struct { uint64_t lo, hi, used_seq; uint32_t gen, epoch, gpu_until; VkBuffer buf; VmaAllocation mem; bool gpu; _Atomic uint32_t sq; } VcEnt;
 static VcEnt vc_tab[VC_TAB];
 static uint32_t vc_pend[VC_TAB];  // entries the pending submission draws from (vc_flush brings them up to date)
-static int vc_npend;
+static _Atomic int vc_npend;
+static inline void vc_wbegin(VcEnt *e) { atomic_fetch_add_explicit(&e->sq, 1, memory_order_acq_rel); }
+static inline void vc_wend(VcEnt *e) { atomic_fetch_add_explicit(&e->sq, 1, memory_order_release); }
+static inline void vc_claim(VcEnt *e, uint64_t pend) {  // (first use in the submission: vc_flush brings it up to date)
+    uint64_t u = __atomic_load_n(&e->used_seq, __ATOMIC_ACQUIRE);
+    if (u != pend && u != ~0ull && __atomic_compare_exchange_n(&e->used_seq, &u, pend, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+        vc_pend[atomic_fetch_add_explicit(&vc_npend, 1, memory_order_relaxed)] = (uint32_t)(e - vc_tab);
+}
 static uint32_t *vc_page_gen;  // per heap page: the generation of its last CPU write seen (vc_gen when observed)
 static uint32_t *vc_page_gpu;  // per heap page: the frame the GPU last wrote it (+1; 0: never)
 // Writes the OS loses. A write tracking query resets the pages' marks, and a store landing on a page while its mark is
@@ -5825,9 +5834,14 @@ static void vc_free_dead(bool all) {
 static bool vc_drop(VcEnt *e) {  // (freed once the submissions that may read it are done)
     if (vc_ndead == VC_DEAD) { vk_wait_seq(vk_pending_seq() - 1); vc_free_dead(false); }
     if (vc_ndead == VC_DEAD) return false;  // (all read by the pending submission: keep it)
-    vc_dead[vc_ndead].b = e->buf; vc_dead[vc_ndead].m = e->mem; vc_dead[vc_ndead++].seq = e->used_seq + VK_DEAD_MARGIN;
+    uint64_t u = __atomic_load_n(&e->used_seq, __ATOMIC_ACQUIRE);  // (not if vc_quick claimed it for the submission meanwhile)
+    if (u >= vk_pending_seq() || !__atomic_compare_exchange_n(&e->used_seq, &u, ~0ull, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+        return false;
+    vc_wbegin(e);
+    vc_dead[vc_ndead].b = e->buf; vc_dead[vc_ndead].m = e->mem; vc_dead[vc_ndead++].seq = u + VK_DEAD_MARGIN;
     vc_bytes -= e->hi - e->lo;
-    memset(e, 0, sizeof *e);
+    memset(e, 0, offsetof(VcEnt, sq));
+    vc_wend(e);
     return true;
 }
 
@@ -5918,8 +5932,16 @@ static int pages_cpu_written(uint64_t addr, uint64_t size, uint32_t since, uint3
 static void vc_mark_gpu(uint64_t lo, uint64_t hi) {
     if (!pt_init()) return;
     uint32_t now = (uint32_t)vk_frame_counter() + 1;
-    for (uint64_t p = lo / VC_PAGE; p < (hi + VC_PAGE - 1) / VC_PAGE && p < gwin_max / VC_PAGE; p++) vc_page_gpu[p] = now;
-    vc_epoch++;
+    // (the entries look again only when a page turns GPU-written - unmarked, or its mark expired: the ~500 transform
+    // feedback sessions a frame in a town mark the same buffers every frame, and each bump sent every vertex cache
+    // lookup and guest_direct memo the long way, under the shadow workers' lock)
+    bool fresh = false;
+    for (uint64_t p = lo / VC_PAGE; p < (hi + VC_PAGE - 1) / VC_PAGE && p < gwin_max / VC_PAGE; p++) {
+        uint32_t o = vc_page_gpu[p];
+        if (!o || now >= o + VC_GPU_HOLD) fresh = true;
+        vc_page_gpu[p] = now;
+    }
+    if (fresh) vc_epoch++;
 }
 
 // A storing shader (stage 0 / 1 / 5) may write any of its bound storage buffers.
@@ -5975,12 +5997,18 @@ static bool vcache_lookup(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceS
         VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = hi - lo,
                                  .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT};
         VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
-        if (vmaCreateBuffer(g_vk.vma, &bi, &ai, &e->buf, &e->mem, NULL) != VK_SUCCESS) { memset(e, 0, sizeof *e); return false; }
-        e->lo = lo; e->hi = hi;
+        VkBuffer nb;
+        VmaAllocation nm;
+        if (vmaCreateBuffer(g_vk.vma, &bi, &ai, &nb, &nm, NULL) != VK_SUCCESS) return false;
+        vc_wbegin(e);
+        e->lo = lo; e->hi = hi; e->mem = nm;
+        __atomic_store_n(&e->buf, nb, __ATOMIC_RELEASE);  // (last: vc_quick matches a range only with its buffer)
+        vc_wend(e);
         vc_bytes += hi - lo;
     }
     uint32_t now = (uint32_t)vk_frame_counter() + 1;
     if (e->epoch != vc_epoch || (e->gpu && now >= e->gpu_until)) {  // (pages turned GPU-written since, or their marks expired)
+        vc_wbegin(e);
         bool was = e->gpu;
         uint32_t last = 0;
         for (uint64_t p = lo / VC_PAGE; p < hi / VC_PAGE; p++) if (vc_page_gpu[p] > last) last = vc_page_gpu[p];
@@ -5988,16 +6016,53 @@ static bool vcache_lookup(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceS
         e->gpu_until = last + VC_GPU_HOLD;
         e->epoch = vc_epoch;
         if (was && !e->gpu) { e->gen = 0; vc_gpu_expired = true; }  // (the GPU's writes aren't tracked: copied whole)
+        vc_wend(e);
     }
     if (e->gpu) { prof_vc_bypass++; return false; }
-    if (e->used_seq != pend) {  // first use in this submission: brought up to date by vc_flush before it runs
-        e->used_seq = pend;
-        vc_pend[vc_npend++] = (uint32_t)(e - vc_tab);
-    }
+    vc_claim(e, pend);
     prof_vc_hits++;
     *buf = e->buf;
     *off = addr - gwin_base - lo;
     return true;
+}
+
+// (the shadow workers) vcache_lookup's answer for a range cached already, up to date with the GPU's writes, without the
+// workers' lock: its entry read under its sequence count, claimed for the submission by compare-and-swap. The first use
+// of a range in each submission took the lock: ~3400 a frame in a town at World detail 4x, two thirds of the parts' wait
+// for it. 1: cached (buf, off); 0: the GPU writes its pages - not cached, decided already (vcache_lookup's bypass);
+// -1: vcache_lookup under the lock.
+static int vc_quick(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceSize *off) {
+    if (vc_on <= 0 || !gmem_buf || gc_lazy || gmem_lo || size > VC_MAX_RANGE) return -1;
+    uint64_t lo = (addr - gwin_base) & ~(VC_PAGE - 1), hi = (addr - gwin_base + size + VC_PAGE - 1) & ~(VC_PAGE - 1);
+    if (hi > gmem_size) return -1;
+    uint64_t pend = vk_pending_seq();
+    uint64_t h = (lo * 0x9E3779B97F4A7C15ull) ^ (hi * 0xC2B2AE3D27D4EB4Full);
+    uint32_t slot = (uint32_t)(h ^ (h >> 32)) & (VC_TAB - 1);
+    for (int probe = 0; probe < 16; probe++, slot = (slot + 1) & (VC_TAB - 1)) {
+        VcEnt *e = &vc_tab[slot];
+        uint32_t s1 = atomic_load_explicit(&e->sq, memory_order_acquire);
+        if (s1 & 1) return -1;
+        VkBuffer b = __atomic_load_n(&e->buf, __ATOMIC_ACQUIRE);
+        if (!b) return -1;  // (not cached: vcache_lookup makes it)
+        if (e->lo != lo || e->hi != hi) continue;
+        uint32_t now = (uint32_t)vk_frame_counter() + 1;
+        if (e->epoch != vc_epoch || (e->gpu && now >= e->gpu_until)) return -1;  // (its GPU marks to look at again)
+        if (e->gpu) {  // (GPU-written: read in the mirror or in place)
+            atomic_thread_fence(memory_order_acquire);
+            if (atomic_load_explicit(&e->sq, memory_order_relaxed) != s1) return -1;
+            prof_vc_bypass++;
+            return 0;
+        }
+        vc_claim(e, pend);  // (claimed here: listed here, whatever follows)
+        atomic_thread_fence(memory_order_acquire);
+        if (atomic_load_explicit(&e->sq, memory_order_relaxed) != s1 || __atomic_load_n(&e->used_seq, __ATOMIC_ACQUIRE) != pend)
+            return -1;
+        prof_vc_hits++;
+        *buf = b;
+        *off = addr - gwin_base - lo;
+        return 1;
+    }
+    return -1;
 }
 
 static int vc_pend_cmp(const void *a, const void *b) {
@@ -6091,8 +6156,23 @@ static bool guest_direct(int kind, uint64_t addr, uint64_t size, VkBuffer *buf, 
             return ok;
         }
     }
+    static int copy = -1;
+    if (copy < 0) copy = getenv("LARECOMP_VK_COPY_VERTICES") != NULL;
+    static int binds = -1;
+    if (binds < 0) binds = getenv("LARECOMP_LOG_BINDS") != NULL;
+    bool r;
+    int q = -1;  // (guest_direct_'s answer without the lock, where the vertex cache has decided the range already)
+    if (!copy && !binds && addr >= gwin_base && GM_IN(addr, size) && !(addr + size > gwin_base + gmem_lo + gmem_size) &&
+        (q = vc_quick(addr, size, buf, off)) >= 0) {
+        if (q == 1) stat_vtx_cached += size;
+        else if (kind == 0 && xm_lookup(addr, size, buf, off)) stat_vtx_cached += size;  // (as guest_direct_ goes on)
+        else { stat_vtx_host += size; *buf = gmem_buf; *off = GM_OFF(addr); }
+        // (the shared memo's writers hold the lock: this thread's own memo only)
+        *e = (__typeof__(*e)){addr, size, seq, frame, *buf, *off, ep, (uint8_t)kind, 1};
+        return true;
+    }
     SWL_AT(5894);
-    bool r = guest_direct_(kind, addr, size, buf, off);
+    r = guest_direct_(kind, addr, size, buf, off);
     atomic_fetch_add_explicit(&sh[si].sq, 1, memory_order_relaxed);
     atomic_thread_fence(memory_order_release);
     sh[si].addr = addr; sh[si].size = size; sh[si].seq = seq; sh[si].frame = frame; sh[si].buf = r ? *buf : VK_NULL_HANDLE;
@@ -10143,7 +10223,7 @@ static uint64_t sw_gen;
 static int sw_left;
 static struct { VkCommandPool pool; VkCommandBuffer *cbs; int n, cap, next; } sw_pools[SW_MAX][VK_SUBS];
 static uint64_t sw_stat_runs, sw_stat_draws, sw_stat_aborts, sw_stat_rewound;  // (logged every 600 frames: sw_run)
-static uint64_t sw_stat_walk_ns, sw_stat_wait_ns;
+static uint64_t sw_stat_walk_ns, sw_stat_wait_ns, sw_stat_run_ns;
 static __thread int sw_budget;  // (a worker) draws left in its part
 static __thread const CmdRec *sw_abort_r;  // (a worker) the draw it gave back (exec_list)
 static __thread const CmdRec *sw_stop;  // (a worker, and the walk) the run ends at this record (NULL: its lists' ends)
@@ -10458,13 +10538,33 @@ static bool sw_walk_risky_(void) {
     bool any = false;
     const NvnTexEntry *ents = (const NvnTexEntry *)st.tpool->entries;
     uint32_t cnt = (uint32_t)st.tpool->count;
+    // (whether a pool slot holds one of the pass's attachments, remembered while the pool, the attachments and the
+    // frame stay: reading the slots' entries missed the caches on most draws. A slot the game fills again with an
+    // attachment within the frame is missed here - its draw then goes back from the worker: sw_run's take-over)
+    static struct { uint32_t tic; uint8_t att; } tcache[1024];
+    static const void *tc_pool;
+    static NvnTexture *tc_att[9];
+    static int tc_na = -1;
+    static uint64_t tc_frame = ~0ull;
+    uint64_t frm = vk_frame_counter();
+    if (tc_pool != st.tpool || tc_frame != frm || tc_na != na || memcmp(tc_att, att, (size_t)na * sizeof att[0])) {
+        memset(tcache, 0xFF, sizeof tcache);
+        tc_pool = st.tpool, tc_frame = frm, tc_na = na;
+        memcpy(tc_att, att, (size_t)na * sizeof att[0]);
+    }
     for (int sg = 0; sg < 2 && !any; sg++)
         for (int k = 0; k < 32 && !any; k++) {
             uint64_t h = st.tex[sg][k];
             uint32_t tic = h & 0xFFFFF;
             if (!h || tic >= cnt) continue;
-            NvnTexture *t = ents[tic].tex;
-            for (int a = 0; a < na; a++) any |= t == att[a];
+            __typeof__(tcache[0]) *e = &tcache[(tic * 2654435761u) >> 22];
+            if (e->tic != tic) {
+                NvnTexture *t = ents[tic].tex;
+                bool a_ = false;
+                for (int a = 0; a < na; a++) a_ |= t == att[a];
+                e->tic = tic, e->att = a_;
+            }
+            any = e->att;
         }
     // (the lighting draw - gtao_before_lighting - and water surfaces - water_before - end the pass too. Their cheap
     // conditions first - water: into the lit image, blended, depth tested and written; lighting: a fragment shader
@@ -10472,10 +10572,11 @@ static bool sw_walk_risky_(void) {
     bool water_pre = water_on() && gtao.target && st.rt.ncolor && st.rt.color[0] == gtao.target && st.color_state[0] && st.ds[0] &&
                      st.ds[1] && st.rt.depth;
     uint64_t c1 = st.program->stages[1].code_addr, fr = vk_frame_counter();
-    static struct { uint64_t code, frame; int ntex; } fc[512];
+    static struct { uint64_t code, frame; int ntex; int8_t light; } fc[512];  // (light: -1 not asked yet)
     __typeof__(fc[0]) *fe = &fc[(c1 >> 4 ^ c1 >> 13) & 511];
-    int ntex = fe->code == c1 && fe->frame == fr ? fe->ntex : -1;
-    bool light_pre = (gtao_on() || ssgi_on() || water_on()) && (ntex < 0 || ntex >= 10);
+    bool known = fe->code == c1 && fe->frame == fr;
+    if (known && fe->light > 0) return true;  // (the lighting draw, as this frame's walk found)
+    bool light_pre = (gtao_on() || ssgi_on() || water_on()) && (!known || fe->light < 0);
     bool special = water_pre || light_pre;
     if (!any && !special) return false;
     ShaderKey vkey = {0}, fkey = {0};  // (the program, as draw_ finds it)
@@ -10488,10 +10589,14 @@ static bool sw_walk_risky_(void) {
     fkey.stencil_slots = stencil_slots(1, &fkey.sint_slots);
     Prog *pr = get_program(st.program, &vkey, &fkey);
     if (!pr || atomic_load(&pr->state) != 1 || !pr->vi || !pr->fi) return true;  // (not known yet: the render thread's)
-    *fe = (__typeof__(*fe)){c1, fr, pr->fi->ntex};
-    if (light_pre && pr->fi->ntex >= 10) {  // (the lighting's: ten textures or more - only then its hash, 512 bytes)
-        g_cur_fs_hash = c1 ? hmix(1469598103934665603ull, (const void *)(uintptr_t)(c1 + 0x30), 0x200) : 0;  // (draw_'s, asked first)
-        if (gtao_is_lighting(pr)) return true;
+    if (light_pre) {  // (the lighting's: ten textures or more - only then its hash, 512 bytes - once a frame per shader)
+        bool l = false;
+        if (pr->fi->ntex >= 10) {
+            g_cur_fs_hash = c1 ? hmix(1469598103934665603ull, (const void *)(uintptr_t)(c1 + 0x30), 0x200) : 0;  // (draw_'s, asked first)
+            l = gtao_is_lighting(pr);
+        }
+        *fe = (__typeof__(*fe)){c1, fr, pr->fi->ntex, (int8_t)l};
+        if (l) return true;
     }
     if (water_pre && water_is_surface(pr)) return true;
     if (!any) return false;
@@ -10585,6 +10690,7 @@ static bool sw_pass_ok(void) {  // (the render thread) runs in this pass: no tra
 static void sw_async_dispatch(const uint64_t *h, uint64_t n, int depth, const CmdRec *stop, int parts);
 static void sw_run(const uint64_t *h, uint64_t n, uint64_t first, int depth, int draws, const CmdRec *stop) {
     // the pass, its contents secondary command buffers (a pass already begun inline ends: its contents are kept)
+    uint64_t trun0 = SDL_GetTicksNS();
     bool want_async = sw_async_on() && sw_async_pass_ok();
     if (!want_async) sw_async_sync();  // (this run waits for its workers: the async ones first)
     xm_flush_back();
@@ -10696,6 +10802,7 @@ static void sw_run(const uint64_t *h, uint64_t n, uint64_t first, int depth, int
         sw_stat_aborts++;
     }
 run_done:
+    sw_stat_run_ns += SDL_GetTicksNS() - trun0;
     sw_stat_runs++;
     sw_stat_draws += (uint64_t)sw_walk_count;
     if (sw_cut_r && sw_cut_risky) sw_pass_cut_note();  // (a draw of the render thread's ended it: the pass is its own now)
@@ -10706,12 +10813,12 @@ run_done:
         if (f >= last + 600) {
             double fr = (double)(f - last);
             LOG("[sw] %.1f runs (%.0f draws) a frame to the shadow workers, %.1f too short for one; walk %.2f ms, wait %.2f ms "
-                "a frame; %.2f runs a frame taken back\n", sw_stat_runs / fr, sw_stat_draws / fr, sw_stat_rewound / fr,
-                sw_stat_walk_ns / 1e6 / fr, sw_stat_wait_ns / 1e6 / fr, sw_stat_aborts / fr);
+                "a frame (runs %.2f ms in all); %.2f runs a frame taken back\n", sw_stat_runs / fr, sw_stat_draws / fr,
+                sw_stat_rewound / fr, sw_stat_walk_ns / 1e6 / fr, sw_stat_wait_ns / 1e6 / fr, sw_stat_run_ns / 1e6 / fr, sw_stat_aborts / fr);
             if (sw_stat_async_runs)
                 LOG("[sw] async: %.2f runs a frame, %.2f waits a frame, %.2f ms waiting a frame, %llu lost\n", sw_stat_async_runs / fr,
                     sw_stat_async_syncs / fr, sw_stat_async_wait_ns / 1e6 / fr, (unsigned long long)sw_stat_async_lost);
-            sw_stat_runs = sw_stat_draws = sw_stat_rewound = sw_stat_walk_ns = sw_stat_wait_ns = sw_stat_aborts = 0;
+            sw_stat_runs = sw_stat_draws = sw_stat_rewound = sw_stat_walk_ns = sw_stat_wait_ns = sw_stat_run_ns = sw_stat_aborts = 0;
             sw_stat_async_runs = sw_stat_async_syncs = sw_stat_async_wait_ns = 0;
             last = f;
         }
@@ -10777,20 +10884,29 @@ static void sw_async_dispatch(const uint64_t *h, uint64_t n, int depth, const Cm
 // list a run could start at (the lists scanned up to one that isn't only state and draws can't make one either - every
 // later start had scanned them again: quadratic, 12 % of the render thread in a town at World detail 4x)
 static uint64_t sw_try(const uint64_t *h, uint64_t i, uint64_t n, int depth, uint64_t *skip) {
-    (void)skip;
     if (!sw_pass_ok()) return 0;
-    {   // (a glance first: a first list that reaches a record a run can't hold before its first draw makes none - the
-        // walk's copies of the state and its rewind were most of such a try)
-        uint64_t q = h[i];
-        for (int g = 0; g < 4096; g++) {
-            const CmdRec *r = (const CmdRec *)(uintptr_t)q;
-            if (r->op == CMD_JUMP) { q = r->x[0]; continue; }
-            if (r->op == CMD_END || r->op == CMD_DRAW_ARRAYS || r->op == CMD_DRAW_ELEMENTS || r->op == CMD_DRAW_ARRAYS_INDIRECT ||
-                r->op == CMD_DRAW_ELEMENTS_INDIRECT)
-                break;
-            if (!sw_walk_op_ok(r)) return 0;
-            q += r->size;
+    {   // (a count first, of the records up to SW_MIN_DRAWS draws: lists with a record a run can't hold before as many
+        // draws make none - ~300 tries a frame in a town at World detail 4x walked them, copied the state twice and
+        // rewound, ~1.5 ms. Those lists aren't tried again from any start before that record: *skip)
+        int draws = 0;
+        uint64_t li = i;
+        for (; li < n && draws < SW_MIN_DRAWS; li++) {
+            uint64_t q = h[li];
+            for (int g = 0; g < 100000 && draws < SW_MIN_DRAWS; g++) {
+                const CmdRec *r = (const CmdRec *)(uintptr_t)q;
+                if (r->op == CMD_END) break;
+                if (r->op == CMD_JUMP) { q = r->x[0]; continue; }
+                if (r->op == CMD_DRAW_ARRAYS || r->op == CMD_DRAW_ELEMENTS || r->op == CMD_DRAW_ARRAYS_INDIRECT ||
+                    r->op == CMD_DRAW_ELEMENTS_INDIRECT)
+                    draws++;
+                else if (!sw_walk_op_ok(r)) {
+                    *skip = li + 1;
+                    return 0;
+                }
+                q += r->size;
+            }
         }
+        if (draws < SW_MIN_DRAWS) { *skip = n; return 0; }
     }
     // (no count scan first - the walk stops at the first record a run can't hold, and translates them here when
     // there were too few draws: the scan read every record once more, 10 % of the render thread)
@@ -10843,6 +10959,10 @@ static void exec_list(uint64_t handle, int depth) {
         // a prefetch past its end is harmless)
         __builtin_prefetch((const char *)r + 256);
         __builtin_prefetch((const char *)r + 384);
+        if (sw_walking) {  // (the walk spends less on each record: further ahead)
+            __builtin_prefetch((const char *)r + 1024);
+            __builtin_prefetch((const char *)r + 2048);
+        }
         void *x = r->extra;
         if (r->op < CMD_COUNT) op_counts[r->op]++;
         if (xm_back_n && !xm_state_op(r->op) && !(xfb_on && (r->op == CMD_DRAW_ARRAYS || r->op == CMD_DRAW_ELEMENTS)))
