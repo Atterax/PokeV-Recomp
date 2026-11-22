@@ -37,7 +37,7 @@ tot = collections.Counter()
 per = collections.defaultdict(collections.Counter)
 n = 0
 for line in open(samples):
-    tid, rip, cnt = line.split()
+    tid, rip, cnt = line.split()[:3]  # (a 4th column: the game function, f_<address>)
     cnt = int(cnt)
     f = where(int(rip, 16))
     tot[f] += cnt
