@@ -165,16 +165,46 @@ static void terrain_distance(int world) {
 // "ter_04_02_streaming_m", Mesagoza's "c01_both_01_field_streaming_m"...: _s 220 m, _m 660...).
 //
 // None of these have a list of their own to follow (the scene's tables mix them with everything else), so a
-// low-priority thread looks for them in all writable guest memory (kernel_data_regions; read with ReadProcessMemory -
-// never faults if the game unmaps it meanwhile): back to back when the field first loads and for 20 s after the
+// low-priority thread looks for them in all writable guest memory (kernel_data_regions; read with self_read -
+// ReadProcessMemory / process_vm_readv, which never fault if the game unmaps it meanwhile): back to back when the field first loads and for 20 s after the
 // GlobalHeap grows by 64 MB at once (fast travel, a new area; 4 a second then - streaming farther, the heap keeps
 // growing in steps and back-to-back passes took 45% of a core), every 2 s otherwise. A pass writes the groups first,
 // then the settings, then the stand-ins (after what they rely on). Every value is written only while it still holds
 // what was read or last written; the game's own are kept by address and put back at "Game's". Off:
 // LARECOMP_WORLD_STANDINS=0.
-#include <windows.h>
 #include <immintrin.h>
+#include <pthread.h>
+#include <time.h>
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <sys/uio.h>
+#include <unistd.h>
+#endif
 int kernel_data_regions(uint64_t *addr, uint64_t *size, int max);
+// n bytes of this process's memory at a into `to` without faulting (false: not all of it readable); *got: how many
+static bool self_read(uint64_t a, void *to, size_t n, size_t *got) {
+#ifdef _WIN32
+    SIZE_T r = 0;
+    BOOL ok = ReadProcessMemory(GetCurrentProcess(), (void *)(uintptr_t)a, to, n, &r);
+    *got = r;
+    return ok && r == n;
+#else
+    struct iovec local = {to, n}, remote = {(void *)(uintptr_t)a, n};
+    ssize_t r = process_vm_readv(getpid(), &local, 1, &remote, 1, 0);
+    *got = r > 0 ? (size_t)r : 0;
+    return r == (ssize_t)n;
+#endif
+}
+static bool rpm(uint64_t a, void *to, size_t n) {
+    size_t got;
+    return self_read(a, to, n, &got);
+}
+static uint64_t clod_ms(void) { return plat_now_ns() / 1000000; }
+static void clod_sleep(unsigned ms) {
+    struct timespec ts = {(time_t)(ms / 1000), (long)(ms % 1000) * 1000000};
+    nanosleep(&ts, NULL);
+}
 #define CLOD_VTABLE 0x44a2ed8ull
 #define CLOD_DIST   0x808
 #define GSG_VTABLE  0x44a4790ull
@@ -279,11 +309,8 @@ static void settings_write(SetSeen *s, const float *f, float k) {
 static float pieces_load(uint64_t entity) {
     uint64_t e0 = 0, name = 0, len = 0;
     char nm[64] = {0};
-    SIZE_T r = 0;
-    if (!ReadProcessMemory(GetCurrentProcess(), (void *)(uintptr_t)(entity + CLOD_DIST + 8), &e0, 8, &r) || !gptr(e0) ||
-        !ReadProcessMemory(GetCurrentProcess(), (void *)(uintptr_t)(e0 + 8), &name, 8, &r) ||
-        !ReadProcessMemory(GetCurrentProcess(), (void *)(uintptr_t)(e0 + 16), &len, 8, &r) || !len || len >= sizeof nm ||
-        !ReadProcessMemory(GetCurrentProcess(), (void *)(uintptr_t)name, nm, len, &r))
+    if (!rpm(entity + CLOD_DIST + 8, &e0, 8) || !gptr(e0) || !rpm(e0 + 8, &name, 8) || !rpm(e0 + 16, &len, 8) || !len ||
+        len >= sizeof nm || !rpm(name, nm, len))
         return 0;
     const char *k = strstr(nm, "streaming_");
     if (!k) return 0;
@@ -301,10 +328,6 @@ static const struct { uint32_t vt, off; } far_kinds[] = {
     {0x44a1058, 0x310},                     // their streaming records
     {0x44a1fd8, 0x38}, {0x44a1fd8, 0x30},  // field environment lights (env/fel: a city's lit windows)
 };
-static bool rpm(uint64_t a, void *to, size_t n) {
-    SIZE_T r = 0;
-    return ReadProcessMemory(GetCurrentProcess(), (void *)(uintptr_t)a, to, n, &r) && r == n;
-}
 static bool far_object_read(uint64_t f, const uint64_t *w) {  // (w: the 0x390 bytes before f, read at once)
     uint64_t base = g_modules[0].base;
     for (size_t i = 0; i < sizeof far_kinds / sizeof far_kinds[0]; i++)
@@ -366,9 +389,13 @@ __attribute__((target("avx2"))) static inline unsigned clod_block(const uint8_t 
     return (unsigned)_mm256_movemask_pd(_mm256_castsi256_pd(_mm256_or_si256(ptr, one)));
 }
 
-static DWORD WINAPI clod_thread(LPVOID unused) {
+static void *clod_thread(void *unused) {
     (void)unused;
+#ifdef _WIN32
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST);
+#else
+    if (nice(19) == -1) {}  // (Linux: this thread only)
+#endif
     static uint8_t buf[(1 << 20) + 0x810];
     static uint64_t ra[1024], rs[1024];
     static struct { uint64_t at, pair; float load; } cand[8192], grp[1024];
@@ -377,8 +404,8 @@ static DWORD WINAPI clod_thread(LPVOID unused) {
     uint64_t fast_until = 0;
     int logged = -1, last_n = -1, nlog = 0;
     for (;;) {
-        if (clod_hurry) { clod_hurry = false; fast_until = GetTickCount64() + 20000; }
-        Sleep(GetTickCount64() < fast_until ? 250 : 2000);
+        if (clod_hurry) { clod_hurry = false; fast_until = clod_ms() + 20000; }
+        clod_sleep(clod_ms() < fast_until ? 250 : 2000);
         int world = rt_sv_world_part("STANDINS"), nr = kernel_data_regions(ra, rs, 1024), nc = 0, ng = 0, ns = 0, no = 0, n = 0;
         int nco = 0;
         static int all = -1;  // (LARECOMP_WORLD_OBJECTS=all: every object of the field farther, as before)
@@ -387,8 +414,8 @@ static DWORD WINAPI clod_thread(LPVOID unused) {
         bool block = (vt >> 36) == 7 && (vt_gsg >> 36) == 7;  // (clod_block's pointer test covers the vtables)
         for (int r = 0; r < nr; r++)
             for (uint64_t c = ra[r], end = ra[r] + rs[r]; c < end; c += 1 << 20) {
-                SIZE_T want = end - c < sizeof buf ? end - c : sizeof buf, got = 0;
-                if (!ReadProcessMemory(GetCurrentProcess(), (void *)(uintptr_t)c, buf, want, &got) || got < 0x810) continue;
+                size_t want = end - c < sizeof buf ? end - c : sizeof buf, got = 0;
+                if (!self_read(c, buf, want, &got) || got < 0x810) continue;
                 size_t last = got - 0x810 < (1 << 20) - 8 ? got - 0x810 : (1 << 20) - 8;  // (the last word looked at)
                 for (size_t i0 = 0; i0 <= last; i0 += 32)
                 for (unsigned m = block ? clod_block(buf + i0) : 15; m; m &= m - 1) {
@@ -502,7 +529,8 @@ void rt_sv_npc_detail(void) {
     }
     if (!clod_started && g_modules[0].base && rt_sv_world_part("STANDINS") > 1) {  // (started once anything is to change)
         clod_started = true;
-        CreateThread(NULL, 0, clod_thread, NULL, 0, NULL);
+        pthread_t th;
+        if (!pthread_create(&th, NULL, clod_thread, NULL)) pthread_detach(th);
     }
     static LodScale people = {"chara_model", "people's", 0, {0}, {0}, -1};
     static LodScale pokemon = {"pokemon", "Pokémon's", 0, {0}, {0}, -1};
