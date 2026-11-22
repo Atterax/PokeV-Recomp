@@ -150,14 +150,14 @@ static void terrain_distance(int world) {
 //   waterfall and sound emitter of the field - over 8000 objects at once in a Violet town - and times 4 the game kept
 //   them all past 2.8 km: ~5-8 fps at World detail 4x in a town where nothing of it showed. So the small and medium
 //   groups' blocks (below 1 km) stay the game's, and only the objects the far view is made of point at a private copy
-//   times n (hle_alloc, the block's 0x80 bytes around it, read by the game as its own): the land (ground_*, area*,
-//   cliff_*, the far stand-ins' instances ins_clod*, the world's rocks *_a_w*) and the field's scenes (the terrain
-//   tiles ter_XX_YY, the far land plates plan_ter_XX_YY - the mountains on the horizon - and the towns and cities).
-//   An object is known by its name (a pointer 0x28 before its block pointer, 0x20 for the second of the two a model
-//   component keeps, 0x388 for an object's record, 0x2b8 for a scene) and its kind (a known vtable at a fixed
-//   distance before: no other words that happen to hold a block's address are touched). The large groups' blocks (1.9
-//   km and up: few objects, big ones) are scaled as a whole. A Violet town at 4x: 49-55 -> 59-60 fps, the far
-//   mountains seen from another town as before. LARECOMP_WORLD_OBJECTS=all: every object farther (as before).
+//   times n (hle_alloc, the block's 0x80 bytes around it, read by the game as its own): what is seen of them - their
+//   models (buildings, land, rocks), the field's scenes (terrain tiles, the far land plates: the mountains on the
+//   horizon, towns, cities) and the environment lights (a city's lit windows) - known by their kind, a known vtable at
+//   a fixed distance before the block pointer (no other word that happens to hold a block's address is touched). Their
+//   collisions, animations, effects and sounds stay at the game's distance. The large groups' blocks (1.9 km and up:
+//   few objects, big ones) are scaled as a whole. A Violet town at 4x: 49-55 -> ~58.5 fps; the lookout over Mesagoza
+//   (the academy, the city's lit windows, the far mountains as before): 52.6 -> 56-58.
+//   LARECOMP_WORLD_OBJECTS=all: every object farther (as before).
 // All of them times n (at 4x the desert south of Mesagoza keeps every cliff and the marked rock is detailed - before,
 // it stayed blurry; that much more drawn costs fps there: 55 at 4x, 58 at 3x, 60 before). A stand-in still never
 // switches past its pieces' group load distance less 160 m (the game's own margin: a 1 km terrain tile's pieces lie that far past its
@@ -292,16 +292,14 @@ static float pieces_load(uint64_t entity) {
          : !strcmp(k, "xxl") ? 6110 : 0;
 }
 
-// The far view's objects (see above): kind and name of the object whose block pointer is at `f`.
+// The far view's objects (see above): what is seen of an object whose block pointer is at `f` - its kind, a known vtable
+// at a fixed distance before the pointer (model components keep two pointers, at +0x38 / +0x30 from their vtable).
 static const struct { uint32_t vt, off; } far_kinds[] = {
-    {0x449f5f0, 0x38}, {0x44a0340, 0xf0}, {0x44a1f38, 0x38}, {0x44a1f38, 0x30}, {0x44a2ba0, 0x38}, {0x44a2ba0, 0x30},
-    {0x44a2158, 0x38}, {0x44a2158, 0x30}, {0x44a2b00, 0x38}, {0x44a2b00, 0x30}, {0x44a1058, 0x310},
-    {0x44a1fd8, 0x38}, {0x44a1fd8, 0x30}, {0x449fc10, 0xd0}, {0x47045d8, 0x18},
-};
-#define SCENES "world/scene/parts/field/unity_output/"
-static const char *const far_names[] = {
-    "ground_", "ins_root_ground_", "ins_clod", "area", "cliff_", "objects_un_a_w", "objects_un_nushi_a_w", "objects_a_w",
-    "ter_", "plan_ter_", SCENES "ter_", SCENES "plan_ter_", SCENES "town_", SCENES "c",
+    {0x44a0340, 0xf0},                      // the field's scene objects (with their position)
+    {0x44a1f38, 0x38}, {0x44a1f38, 0x30},  // model components: buildings, land, rocks, plants...
+    {0x44a2ba0, 0x38}, {0x44a2ba0, 0x30},  // the field's scenes: terrain tiles, the far land plates, towns, cities
+    {0x44a1058, 0x310},                     // their streaming records
+    {0x44a1fd8, 0x38}, {0x44a1fd8, 0x30},  // field environment lights (env/fel: a city's lit windows)
 };
 static bool rpm(uint64_t a, void *to, size_t n) {
     SIZE_T r = 0;
@@ -309,29 +307,18 @@ static bool rpm(uint64_t a, void *to, size_t n) {
 }
 static bool far_object_read(uint64_t f, const uint64_t *w) {  // (w: the 0x390 bytes before f, read at once)
     uint64_t base = g_modules[0].base;
-    bool kind = false;
-    for (size_t i = 0; i < sizeof far_kinds / sizeof far_kinds[0] && !kind; i++)
-        kind = w[(0x390 - far_kinds[i].off) / 8] == base + far_kinds[i].vt;
-    if (!kind) return false;
-    static const int at[4] = {0x28, 0x20, 0x388, 0x2b8};
-    for (int k = 0; k < 4; k++) {
-        char t[48] = {0};
-        uint64_t v = w[(0x390 - at[k]) / 8];
-        if ((v >> 36) != 7 || !rpm(v, t, sizeof t - 1) || !(t[0] >= 'A' && t[0] <= 'z')) continue;
-        for (size_t i = 0; i < sizeof far_names / sizeof far_names[0]; i++)
-            if (!strncmp(t, far_names[i], strlen(far_names[i]))) return true;
-        return false;  // (named: not one of them)
-    }
+    for (size_t i = 0; i < sizeof far_kinds / sizeof far_kinds[0]; i++)
+        if (w[(0x390 - far_kinds[i].off) / 8] == base + far_kinds[i].vt) return true;
     (void)f;
     return false;
 }
-// Decided before, by the object's address and the two words its kind and first name hang on (a new object there
-// decides again): most of a pass's objects are the same as the last pass's.
+// Decided before, by the object's address and the words its kind hangs on (a new object there decides again): most of
+// a pass's objects are the same as the last pass's.
 static struct { uint64_t f, k1, k2; bool is_far; } far_seen[65536];
 static bool far_object(uint64_t f) {
     uint64_t w[0x390 / 8];
     if (!rpm(f - 0x390, w, sizeof w)) return false;
-    uint64_t k1 = w[(0x390 - 0x38) / 8] ^ w[(0x390 - 0xf0) / 8] ^ w[(0x390 - 0x310) / 8], k2 = w[(0x390 - 0x28) / 8];
+    uint64_t k1 = w[(0x390 - 0x38) / 8] ^ w[(0x390 - 0xf0) / 8] ^ w[(0x390 - 0x310) / 8], k2 = w[(0x390 - 0x30) / 8];
     uint32_t h = (uint32_t)((f >> 3) * 0x9E3779B1u) >> 16;
     if (far_seen[h].f == f && far_seen[h].k1 == k1 && far_seen[h].k2 == k2) return far_seen[h].is_far;
     bool r = far_object_read(f, w);
