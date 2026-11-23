@@ -30,7 +30,7 @@ jobs:
             PYTHON=python3.12 tools/za/dist-linux.sh
             # the newest glibc symbol it needs: what the AppImage runs on
             find build/linux/x86_64/za-AppDir -type f \( -name "*.so*" -o -perm -u+x \) -exec objdump -T {} + 2>/dev/null |
-                grep -o "GLIBC_[0-9.]*" | sort -uV | tail -1'
+                grep -o "GLIBC_[0-9.]*" | sort -uV | tail -1 || true  # (objdump fails on the scripts: pipefail)'
 
       - uses: actions/upload-artifact@v4
         with:
