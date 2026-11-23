@@ -180,6 +180,9 @@ static void terrain_distance(int world) {
 #else
 #include <sys/uio.h>
 #include <unistd.h>
+// (glibc declares it only under _GNU_SOURCE, which rt.h's headers came before)
+ssize_t process_vm_readv(pid_t pid, const struct iovec *local, unsigned long nlocal, const struct iovec *remote,
+                         unsigned long nremote, unsigned long flags);
 #endif
 int kernel_data_regions(uint64_t *addr, uint64_t *size, int max);
 // n bytes of this process's memory at a into `to` without faulting (false: not all of it readable); *got: how many
