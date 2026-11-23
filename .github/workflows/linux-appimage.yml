@@ -25,6 +25,8 @@ jobs:
             apt-get update
             apt-get install -y --no-install-recommends dotnet-sdk-8.0 python3-venv
             git config --global --add safe.directory /src
+            # (the Makefile shader steps call a bare python, as build-all.yml provides; the image only has python3)
+            ln -sf "$(command -v python3.12)" /usr/local/bin/python
             PYTHON=python3.12 tools/za/dist-linux.sh
             # the newest glibc symbol it needs: what the AppImage runs on
             find build/linux/x86_64/za-AppDir -type f \( -name "*.so*" -o -perm -u+x \) -exec objdump -T {} + 2>/dev/null |
