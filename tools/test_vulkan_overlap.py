@@ -68,18 +68,27 @@ decide_harness = r'''
 #include <string.h>
 #define HEAP_BASE 0x7240000000ull
 #define LOG(...) fprintf(stderr, __VA_ARGS__)
+enum { GPU_DYN_VERTEX = 0, GPU_OVERLAP = 1, GPU_COMPAT_N = 8 };
+enum { GPU_AUTO = 0, GPU_ON = 1, GPU_OFF = 2 };
+static struct { int gpu_compat[GPU_COMPAT_N]; } g_settings;
+static struct { struct { uint32_t vendorID; } props; } g_vk = {{0x10de}};
 static int tracking = 1;
 static int pages_cpu_written(uint64_t addr, uint64_t size, uint32_t since, uint32_t *now) {
     assert(addr == HEAP_BASE && size == 4096 && !since); *now = 1; return tracking ? 0 : -1;
 }
 static const char *heap_tracking_reason(void) { return "the guest heap is driver memory (dma-buf), which the OS can't track"; }
+static bool xm_on(void) { return false; }
 ''' + decide + r'''
 int main(int argc, char **argv) {
-    assert(argc == 3);
+    assert(argc >= 3);
     tracking = !strcmp(argv[1], "tracked");
     bool want = !strcmp(argv[2], "on");
+    if (argc >= 4 && !strcmp(argv[3], "amd")) g_vk.props.vendorID = 0x1002;
+    if (argc >= 5 && !strcmp(argv[4], "compat-on")) g_settings.gpu_compat[GPU_OVERLAP] = GPU_ON;
+    if (argc >= 5 && !strcmp(argv[4], "compat-off")) g_settings.gpu_compat[GPU_OVERLAP] = GPU_OFF;
     assert(overlap_on() == want && overlap_on() == want);  // (decided once)
-    printf("PASS: overlap %s, tracking %s, LARECOMP_GPU_OVERLAP=%s, LARECOMP_OVERLAP_WATCH=%s\n", want ? "on" : "off", tracking ? "yes" : "no",
+    printf("PASS: overlap %s, tracking %s, vendor %#x, LARECOMP_GPU_OVERLAP=%s, LARECOMP_OVERLAP_WATCH=%s\n", want ? "on" : "off", tracking ? "yes" : "no",
+           g_vk.props.vendorID,
            getenv("LARECOMP_GPU_OVERLAP") ? getenv("LARECOMP_GPU_OVERLAP") : "(unset)",
            getenv("LARECOMP_OVERLAP_WATCH") ? getenv("LARECOMP_OVERLAP_WATCH") : "(unset)");
 }
@@ -94,6 +103,8 @@ snap_harness = r'''
 #include <string.h>
 #include <unistd.h>
 typedef struct { uint64_t addr, size; } Range;
+#define NCTX 1
+static inline int sw_ctx(void) { return 0; }
 static struct { Range sbuf[6][16]; } st;
 static uint8_t *heap_mem;
 #define HEAP_MAX (64ull << 20)
@@ -467,13 +478,16 @@ with tempfile.TemporaryDirectory(prefix='vulkan-overlap-') as temporary:
                         str(cfile), '-o', str(exe)], check=True)
         env = dict(os.environ)
         env.pop('LARECOMP_OVERLAP_WATCH', None)
-        if name == 'decide':  # default on with tracking, off without (unless forced), =0 off
+        if name == 'decide':  # default on with tracking, off without (unless forced), =0 off, AMD default off, F1 Compatibility
             env.pop('LARECOMP_GPU_OVERLAP', None)
             subprocess.run([str(exe), 'tracked', 'on'], check=True, timeout=10, env=env)
             subprocess.run([str(exe), 'untracked', 'off'], check=True, timeout=10, env=env)
             subprocess.run([str(exe), 'untracked', 'on'], check=True, timeout=10, env=dict(env, LARECOMP_GPU_OVERLAP='1'))
             subprocess.run([str(exe), 'tracked', 'off'], check=True, timeout=10, env=dict(env, LARECOMP_GPU_OVERLAP='0'))
             subprocess.run([str(exe), 'tracked', 'off'], check=True, timeout=10, env=dict(env, LARECOMP_OVERLAP_WATCH='0'))
+            subprocess.run([str(exe), 'tracked', 'off', 'amd'], check=True, timeout=10, env=env)
+            subprocess.run([str(exe), 'tracked', 'on', 'amd', 'compat-on'], check=True, timeout=10, env=env)
+            subprocess.run([str(exe), 'tracked', 'off', 'nv', 'compat-off'], check=True, timeout=10, env=env)
             continue
         if name == 'snap':  # the hash probe (watch off), the write watch, no tracking
             subprocess.run([str(exe)], check=True, timeout=10, env=dict(env, LARECOMP_OVERLAP_WATCH='0'))

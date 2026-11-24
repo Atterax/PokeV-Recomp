@@ -6,6 +6,7 @@ as they were. Scratch folders only: the player's own data is never read."""
 import hashlib
 import os
 from pathlib import Path
+import platform
 import shlex
 import shutil
 import subprocess
@@ -23,6 +24,12 @@ if deps:
 elif shutil.which('pkg-config') and subprocess.run(['pkg-config', '--exists', 'sdl3']).returncode == 0:
     flags = shlex.split(subprocess.run(['pkg-config', '--cflags', '--libs', 'sdl3'], capture_output=True, text=True,
                                        check=True).stdout)
+else:
+    arch = 'aarch64' if platform.machine() in ('arm64', 'aarch64') else 'x86_64'
+    for prefix in (ROOT / f'build/linux/{arch}/deps', ROOT / 'build/deps-linux', ROOT / 'build/deps'):
+        if (prefix / 'include/SDL3').is_dir():
+            flags = [f'-I{prefix}/include', f'-L{prefix}/lib', f'-Wl,-rpath,{prefix}/lib', '-lSDL3']
+            break
 
 
 def snapshot(top):

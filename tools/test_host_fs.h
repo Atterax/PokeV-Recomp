@@ -42,6 +42,43 @@ static ssize_t test_write(int fd, const void *p, size_t n, off_t off) {
 #undef fsync
 const char *g_romfs_dir;
 int rt_romfs_files;
+int g_game_is_la = 1;
+Settings g_settings;
+int16_t g_bind_pad[BIND_PAD_COUNT];
+void settings_load(void) {}
+bool settings_list_has(const char *list, const char *item) { (void)list, (void)item; return false; }
+const char *pl_prompt_set(void) { return NULL; }
+uint64_t plat_now_ns(void) { return 0; }
+#ifdef _WIN32
+int plat_open_file(const char *path, int flags) {
+    DWORD access_f = (flags & O_RDWR) ? GENERIC_READ | GENERIC_WRITE : GENERIC_READ;
+    DWORD disp = !(flags & O_CREAT) ? OPEN_EXISTING : (flags & O_EXCL) ? CREATE_NEW : OPEN_ALWAYS;
+    HANDLE h = CreateFileA(path, access_f, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, disp,
+                           FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) {
+        DWORD err = GetLastError();
+        errno = (err == ERROR_FILE_EXISTS || err == ERROR_ALREADY_EXISTS) ? EEXIST :
+                (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) ? ENOENT : EACCES;
+        return -1;
+    }
+    int fd = _open_osfhandle((intptr_t)h, ((flags & O_RDWR) ? _O_RDWR : _O_RDONLY) | _O_BINARY);
+    if (fd < 0) CloseHandle(h);
+    return fd;
+}
+int plat_rename(const char *from, const char *to) {
+    if (MoveFileExA(from, to, 0)) return 0;
+    DWORD err = GetLastError();
+    errno = (err == ERROR_FILE_EXISTS || err == ERROR_ALREADY_EXISTS) ? EEXIST :
+            (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) ? ENOENT : EACCES;
+    return -1;
+}
+#else
+int plat_open_file(const char *path, int flags) { return open(path, flags, 0644); }
+int plat_rename(const char *from, const char *to) {
+    if (!access(to, F_OK)) { errno = EEXIST; return -1; }
+    return rename(from, to);
+}
+#endif
 const char *rando_seed_dir(void) { return NULL; }
 bool romfs_layout(const char *p, RomfsLayout *l, char *why, size_t n) { abort(); }
 bool rando_romfs_override(const char *p, char *out, size_t n) { abort(); }
