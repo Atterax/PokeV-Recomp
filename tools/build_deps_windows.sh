@@ -29,10 +29,9 @@ fetch() {  # url sha256 file
 }
 unpack() { rm -rf "$S/$2" && mkdir -p "$S/$2" && tar -xf "$S/$1" -C "$S/$2" --strip-components 1; }
 
-fetch https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz \
-      8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e ffmpeg-9.0.2.tar.xz
-
 if [ ! -f "$P/lib/libavcodec.dll.a" ]; then
+    fetch https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz \
+          8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e ffmpeg-9.0.2.tar.xz
     unpack ffmpeg-9.0.2.tar.xz ffmpeg
     (cd "$S/ffmpeg" && ./configure --prefix="$P" --cc=gcc --cxx=g++ --arch=x86_64 --target-os=mingw32 \
         --enable-shared --disable-static --disable-asm --disable-x86asm --disable-inline-asm \
@@ -41,6 +40,7 @@ if [ ! -f "$P/lib/libavcodec.dll.a" ]; then
         --enable-protocol=file --enable-demuxer=matroska,mov \
         --enable-decoder=vp9,vp8,vorbis,opus,h264,aac --enable-parser=vp9,vp8,vorbis,opus,h264,aac \
         && make -j"$JOBS" && make install)
+    rm -rf "$S/ffmpeg"
 fi
 grep -q 'GPL version 3\|--enable-gpl' "$P/lib/pkgconfig/libavcodec.pc" && { echo "deps-win: FFmpeg is not LGPL"; exit 1; }
 echo "deps-win: $(ls "$P/bin"/*.dll | xargs -n1 basename | tr '\n' ' ')"

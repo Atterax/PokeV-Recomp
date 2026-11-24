@@ -11,8 +11,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build-and-test:
@@ -42,93 +42,71 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      # ---- Linux (Ubuntu) ----
-      - name: Install Linux Dependencies
-        if: matrix.platform == 'linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            clang lld cmake ninja-build pkg-config nasm python3-venv curl git \
-            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev \
-            libxss-dev libxfixes-dev libxtst-dev libxkbcommon-dev \
-            libwayland-dev wayland-protocols libdecor-0-dev libegl-dev \
-            libdrm-dev libgbm-dev libpulse-dev libasound2-dev libpipewire-0.3-dev \
-            libdbus-1-dev libudev-dev libibus-1.0-dev libvulkan-dev libopus-dev
-
+      # ---- Linux (Ubuntu) Dependencies ----
       - name: Cache Linux Dependencies
         if: matrix.platform == 'linux'
+        id: linux-deps-cache
         uses: actions/cache@v4
         with:
           path: build/linux/x86_64/deps
-          key: linux-deps-${{ hashFiles('tools/linux/build_deps.sh') }}
+          key: linux-deps-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('tools/linux/build_deps.sh') }}
 
-      - name: Build Linux Executable
+      - name: Install Linux Dependencies
         if: matrix.platform == 'linux'
+        env:
+          DEBIAN_FRONTEND: noninteractive
+          NEEDRESTART_MODE: l
         run: |
-          bash tools/za/build-linux.sh
+          sudo apt-get update
+          if [ "${{ steps.linux-deps-cache.outputs.cache-hit }}" = "true" ]; then
+            sudo -E apt-get install -y --no-install-recommends \
+              clang lld ccache pkg-config libvulkan-dev libopus-dev
+          else
+            sudo -E apt-get install -y --no-install-recommends \
+              clang lld ccache cmake ninja-build pkg-config nasm python3-venv curl git \
+              libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev \
+              libxss-dev libxfixes-dev libxtst-dev libxkbcommon-dev \
+              libwayland-dev wayland-protocols libdecor-0-dev libegl-dev \
+              libdrm-dev libgbm-dev libpulse-dev libasound2-dev libpipewire-0.3-dev \
+              libdbus-1-dev libudev-dev libibus-1.0-dev libvulkan-dev libopus-dev
+          fi
 
-      # ---- Windows (MSYS2 UCRT64) ----
+      # ---- Windows (MSYS2 UCRT64) Dependencies ----
       - name: Setup MSYS2 UCRT64 Toolchain
         if: matrix.platform == 'windows'
         uses: msys2/setup-msys2@v2
         with:
-          location: 'C:\msys64'
           msystem: UCRT64
           update: false
           path-type: inherit
-          install: make nasm diffutils
+          cache: true
+          install: >-
+            make
+            nasm
+            diffutils
+            mingw-w64-ucrt-x86_64-ccache
+            mingw-w64-ucrt-x86_64-clang
+            mingw-w64-ucrt-x86_64-lld
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-binutils
+            mingw-w64-ucrt-x86_64-sdl3
+            mingw-w64-ucrt-x86_64-vulkan-devel
+            mingw-w64-ucrt-x86_64-shaderc
+            mingw-w64-ucrt-x86_64-spirv-tools
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-vulkan-memory-allocator
+            mingw-w64-ucrt-x86_64-opus
 
-      - name: Install MSYS2 UCRT64 Packages
-        if: matrix.platform == 'windows'
-        shell: msys2 {0}
-        run: |
-          sed -i 's/#DisableDownloadTimeout/DisableDownloadTimeout/g' /etc/pacman.conf || true
-          grep -q "DisableDownloadTimeout" /etc/pacman.conf || echo "DisableDownloadTimeout" >> /etc/pacman.conf
-          sed -i 's/#ParallelDownloads = 5/ParallelDownloads = 5/g' /etc/pacman.conf || true
-          for i in 1 2 3 4 5; do
-            echo "Pacman install attempt $i..."
-            if pacman -S --needed --noconfirm --disable-download-timeout \
-              mingw-w64-ucrt-x86_64-clang \
-              mingw-w64-ucrt-x86_64-lld \
-              mingw-w64-ucrt-x86_64-gcc \
-              mingw-w64-ucrt-x86_64-binutils \
-              mingw-w64-ucrt-x86_64-sdl3 \
-              mingw-w64-ucrt-x86_64-vulkan-devel \
-              mingw-w64-ucrt-x86_64-shaderc \
-              mingw-w64-ucrt-x86_64-spirv-tools \
-              mingw-w64-ucrt-x86_64-pkgconf \
-              mingw-w64-ucrt-x86_64-vulkan-memory-allocator \
-              mingw-w64-ucrt-x86_64-opus; then
-              echo "Pacman packages installed successfully!"
-              exit 0
-            fi
-            echo "Attempt $i failed, retrying in 5s..."
-            sleep 5
-          done
-          echo "All pacman install attempts failed!"
-          exit 1
-
-      - name: Setup Python (Windows)
-        if: matrix.platform == 'windows'
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Cache Windows Dependencies
-        if: matrix.platform == 'windows'
-        uses: actions/cache@v4
-        with:
-          path: build/deps-win
-          key: win-deps-${{ hashFiles('tools/build_deps_windows.sh') }}
-
-      - name: Build Windows Executable
+      - name: Configure Windows UCRT64 PATH
         if: matrix.platform == 'windows'
         shell: bash
         run: |
-          unset INCLUDE LIB LIBPATH
+          set -euo pipefail
           UCRT_DIR=""
           for candidate in \
+            "/d/a/_temp/msys64/ucrt64/bin" \
             "/d/a/_temp/setup-msys2/msys64/ucrt64/bin" \
+            "/c/msys64/msys64/ucrt64/bin" \
             "/c/msys64/ucrt64/bin" \
             "/c/hostedtoolcache/windows/msys64/ucrt64/bin"; do
             if [ -x "$candidate/clang.exe" ]; then
@@ -140,24 +118,140 @@ jobs:
             UCRT_CLANG=$(find /d/a/_temp /c -maxdepth 5 -name "clang.exe" 2>/dev/null | grep -i "ucrt64/bin/clang.exe" | head -n 1 || true)
             [ -n "$UCRT_CLANG" ] && UCRT_DIR=$(dirname "$UCRT_CLANG")
           fi
-          CLEAN_PATH=$(echo "$PATH" | tr ':' '\n' | grep -v -i "Program Files/LLVM" | grep -v -i "Windows Kits" | tr '\n' ':')
-          export PATH="$UCRT_DIR:$(dirname "$UCRT_DIR")/usr/bin:$CLEAN_PATH"
+          [ -n "$UCRT_DIR" ] || { echo "UCRT64 clang.exe not found"; exit 1; }
+          echo "Using UCRT64 toolchain at: $UCRT_DIR"
           echo "$UCRT_DIR" >> "$GITHUB_PATH"
           echo "$(dirname "$UCRT_DIR")/usr/bin" >> "$GITHUB_PATH"
+
+      - name: Setup Python (Windows)
+        if: matrix.platform == 'windows'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Cache Windows Dependencies
+        if: matrix.platform == 'windows'
+        uses: actions/cache@v4
+        with:
+          path: |
+            build/deps-win
+            !build/deps-win/src
+          key: win-deps-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('tools/build_deps_windows.sh') }}
+
+      # ---- macOS (Apple Silicon) Dependencies ----
+      - name: Configure Homebrew Cache
+        if: matrix.platform == 'macos'
+        id: brew-config
+        run: |
+          export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 HOMEBREW_NO_ENV_HINTS=1
+          echo "cache_dir=$(brew --cache)" >> "$GITHUB_OUTPUT"
+          BREW_VER="$(sw_vers -productVersion)-$(brew --version | head -n 1)"
+          KEY_HASH=$(printf '%s\nsdl3 ffmpeg opus ccache\n' "$BREW_VER" | shasum -a 256 | cut -c1-16)
+          echo "key=$KEY_HASH" >> "$GITHUB_OUTPUT"
+
+      - name: Cache macOS Homebrew Bottles
+        if: matrix.platform == 'macos'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ steps.brew-config.outputs.cache_dir }}/downloads
+            ${{ steps.brew-config.outputs.cache_dir }}/api
+          key: macos-brew-${{ runner.arch }}-${{ steps.brew-config.outputs.key }}
+          restore-keys: |
+            macos-brew-${{ runner.arch }}-
+
+      - name: Install macOS Dependencies
+        if: matrix.platform == 'macos'
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+          HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: "1"
+          HOMEBREW_NO_ENV_HINTS: "1"
+        run: |
+          brew install --quiet sdl3 ffmpeg opus ccache
+
+      # ---- Compiler Cache (ccache) ----
+      - name: Configure ccache
+        id: ccache-config
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.platform }}" = "windows" ]; then
+            unset INCLUDE LIB LIBPATH
+            CLEAN_PATH=$(echo "$PATH" | tr ':' '\n' | grep -v -i "Program Files/LLVM" | grep -v -i "Windows Kits" | tr '\n' ':')
+            export PATH="$CLEAN_PATH"
+            CCACHE_DIR="$(cygpath -m "$PWD/build/ccache")"
+            CCACHE_BASEDIR="$(cygpath -m "$PWD")"
+          else
+            CCACHE_DIR="$PWD/build/ccache"
+            CCACHE_BASEDIR="$PWD"
+          fi
+          mkdir -p "$PWD/build/ccache"
+          {
+            echo "CC_LAUNCHER=ccache"
+            echo "CCACHE_DIR=$CCACHE_DIR"
+            echo "CCACHE_BASEDIR=$CCACHE_BASEDIR"
+            echo "CCACHE_NOHASHDIR=true"
+            echo "CCACHE_COMPILERCHECK=content"
+            echo "CCACHE_COMPRESS=true"
+            echo "CCACHE_COMPRESSLEVEL=6"
+            echo "CCACHE_MAXSIZE=400M"
+          } >> "$GITHUB_ENV"
+          COMPILER_VER="$(clang --version | head -n 2; clang++ --version | head -n 1)"
+          if [ "${{ matrix.platform }}" = "linux" ]; then
+            MAKE_FLAGS="$(printf 'pv:\n\t@echo "$(RTFLAGS)|$(CXXFLAGS)|$(UIFLAGS)|$(GENFLAGS)"\n' | make -s -f Makefile -f - DEPS=deps SHADERC=-lshaderc_shared GENOPT="-O1 -DGUEST_VOLATILE" pv)"
+          elif [ "${{ matrix.platform }}" = "windows" ]; then
+            MAKE_FLAGS="$(printf 'pv:\n\t@echo "$(RTFLAGS)|$(CXXFLAGS)|$(UIFLAGS)|$(GENFLAGS)"\n' | make -s -f Makefile -f - DEPS=deps RELEASE=1 pv)"
+          else
+            MAKE_FLAGS="$(printf 'pv:\n\t@echo "$(RTFLAGS)|$(CXXFLAGS)|$(UIFLAGS)|$(GENFLAGS)"\n' | make -s -f Makefile -f - pv)"
+          fi
+          BUILD_CFG="platform=${{ matrix.platform }};arch=${{ runner.arch }};os=${{ runner.os }};flags=$MAKE_FLAGS"
+          KEY_HASH=$(printf '%s\n%s\n' "$COMPILER_VER" "$BUILD_CFG" | (sha256sum 2>/dev/null || shasum -a 256) | cut -c1-16)
+          clang --version | head -n 1
+          ccache --version | head -n 1
+          echo "key=$KEY_HASH" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Compiler Objects (ccache)
+        uses: actions/cache@v4
+        with:
+          path: build/ccache
+          key: ccache-${{ matrix.platform }}-${{ runner.arch }}-${{ steps.ccache-config.outputs.key }}-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ matrix.platform }}-${{ runner.arch }}-${{ steps.ccache-config.outputs.key }}-
+
+      - name: Reset ccache Statistics
+        shell: bash
+        run: ccache -z
+
+      # ---- Platform Builds ----
+      - name: Build Linux Executable
+        if: matrix.platform == 'linux'
+        run: |
+          if [ "${{ steps.linux-deps-cache.outputs.cache-hit }}" = "true" ]; then
+            PKGCHECK=0 bash tools/za/build-linux.sh
+          else
+            bash tools/za/build-linux.sh
+          fi
+
+      - name: Build Windows Executable
+        if: matrix.platform == 'windows'
+        shell: bash
+        run: |
+          unset INCLUDE LIB LIBPATH
+          CLEAN_PATH=$(echo "$PATH" | tr ':' '\n' | grep -v -i "Program Files/LLVM" | grep -v -i "Windows Kits" | tr '\n' ':')
+          export PATH="$CLEAN_PATH"
           bash tools/build_deps_windows.sh
           make -j"$(nproc)" B=build/win DEPS="$PWD/build/deps-win" RELEASE=1 build/win/PokeV-Recomp.exe
           ! nm build/win/PokeV-Recomp.exe | grep -q ' f_70'
-
-      # ---- macOS (Apple Silicon) ----
-      - name: Install macOS Dependencies
-        if: matrix.platform == 'macos'
-        run: |
-          brew install sdl3 ffmpeg opus
 
       - name: Build macOS Executable
         if: matrix.platform == 'macos'
         run: |
           make -j"$(sysctl -n hw.ncpu)" B=build/mac build/mac/PokeV-Recomp
+
+      - name: Report ccache Statistics
+        shell: bash
+        run: ccache -s
 
       # ---- Automated Tests ----
       - name: Run Automated Tests
@@ -194,7 +288,34 @@ jobs:
               tools/test_windows_processes.py
             )
           fi
-          for t in "${tests[@]}"; do
-            echo "=== Running $t ==="
-            python3 "$t"
-          done
+          python3 - "${tests[@]}" <<'PY'
+          from concurrent.futures import ThreadPoolExecutor
+          import os, subprocess, sys, time
+
+          tests = sys.argv[1:]
+          workers = max(1, min(len(tests), os.cpu_count() or 4))
+
+          def run_one(test_path):
+              t0 = time.monotonic()
+              proc = subprocess.run([sys.executable, test_path], capture_output=True, text=True)
+              return test_path, proc.returncode, proc.stdout, proc.stderr, time.monotonic() - t0
+
+          t_start = time.monotonic()
+          with ThreadPoolExecutor(max_workers=workers) as pool:
+              results = list(pool.map(run_one, tests))
+
+          failed = 0
+          for test_path, rc, out, err, dur in results:
+              print(f"=== Running {test_path} ({dur:.2f}s) ===", flush=True)
+              if out:
+                  sys.stdout.write(out if out.endswith("\n") else out + "\n")
+              if err:
+                  sys.stderr.write(err if err.endswith("\n") else err + "\n")
+              if rc != 0:
+                  print(f"FAIL: {test_path} exited with status {rc}", file=sys.stderr, flush=True)
+                  failed += 1
+
+          total_dur = time.monotonic() - t_start
+          print(f"=== Completed {len(tests)} tests across {workers} workers in {total_dur:.2f}s ===", flush=True)
+          sys.exit(1 if failed else 0)
+          PY
