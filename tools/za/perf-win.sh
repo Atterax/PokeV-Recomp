@@ -4,7 +4,7 @@
 # settings, the save (the game autosaves) and the shader cache - the player's are never touched. Then the [slow] lines
 # (frames over 50 ms, runtime/nvn/slowframe.c) summed up.
 #   GAME=<install folder> (with extracted/, save/save_0, larecomp.ini: the game code built and a save to start from)
-#   EXE=<lasrecomp.exe> (default: build/dist-za/ZA Recomp/lasrecomp.exe, with its DLLs next to it)
+#   EXE=<PokeV-Recomp.exe> (default: build/dist-za/ZA Recomp/PokeV-Recomp.exe, with its DLLs next to it)
 #   CACHE=cold (empty shader caches: every shader is new, as the first time a move is seen; default) | warm (the
 #   install's caches) | keep (the previous run's: what a second session finds)
 #   SHOT=<n>: the window every n frames in build/perf/build/frame_*.png (0: none, default)
@@ -15,7 +15,7 @@
 # no new frames.
 cd "$(dirname "$0")/../.." || exit 1
 [ -n "$GAME" ] || { echo "GAME=<the ZA Recomp folder> needed"; exit 1; }
-EXE=${EXE:-build/dist-za/ZA Recomp/lasrecomp.exe}
+EXE=${EXE:-build/dist-za/ZA Recomp/PokeV-Recomp.exe}
 R=build/perf
 [ -f "$GAME/extracted/lasgame.dll" ] || { echo "no game code in $GAME/extracted"; exit 1; }
 rm -rf "$R/build" "$R/save" "$R/logs" "$R/perf.log"
@@ -47,7 +47,7 @@ taskkill //F //T //PID "$(cat /proc/$G/winpid 2>/dev/null)" > /dev/null 2>&1
 wait $G 2>/dev/null
 # (and any left from this EXE - the pid lookup can miss it, and a leftover game skews the next run's numbers; the
 # player's install is another path)
-for p in $(powershell -NoProfile -Command "Get-Process lasrecomp -EA 0 | ? Path -eq '$(cygpath -aw "$EXE")' | % Id" | tr -d '\r'); do
+for p in $(powershell -NoProfile -Command "Get-Process '$(basename "${EXE%.exe}")' -EA 0 | ? Path -eq '$(cygpath -aw "$EXE")' | % Id" | tr -d '\r'); do
     taskkill //F //PID "$p" > /dev/null 2>&1
 done
 grep -a -m3 "FATAL\|EXCEPTION\|access violation" "$R/perf.log"

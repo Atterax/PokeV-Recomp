@@ -3,7 +3,7 @@
 # monitor (each line an event): the [slow] lines (slow frames, runtime/nvn/slowframe.c), fps drops,
 # errors and crashes, and when the game starts and exits. Each line has its line number in play.log (L<n>) to read
 # around it. Polled, the log never held open: the game renames it to play-anterior.log at each start (runtime/main.c).
-#   GAME=<install folder> (needed: the ZA Recomp folder with lasrecomp.exe and logs/)
+#   GAME=<install folder> (needed: the PokeV-Recomp folder with PokeV-Recomp.exe and logs/)
 #   FROM=start: the current log from its first line (default: only what is written from now on)
 [ -n "$GAME" ] || { echo "GAME=<the ZA Recomp folder> needed"; exit 1; }
 L="$GAME/logs/play.log"
@@ -11,9 +11,9 @@ size() { stat -c %s "$L" 2>/dev/null || echo 0; }
 # (the log so far ends a line: a marker line between the log's own)
 endsnl() { [ "$off" = 0 ] || [ "$(tail -c +"$off" "$L" | head -c 1 | od -An -tx1 | tr -d ' ')" = 0a ]; }
 # (this install's game only: not a test's (tools/za/perf-win.sh) from build/dist-za)
-EXEW=$(cygpath -aw "$GAME/lasrecomp.exe")
+EXEW=$(cygpath -aw "$GAME/PokeV-Recomp.exe")
 # (compared in PowerShell: -eq ignores case; Git Bash's grep -iF aborts on such a path)
-running() { powershell -NoProfile -Command "if (Get-Process lasrecomp -EA 0 | ? Path -eq '$EXEW') {1} else {0}" |
+running() { powershell -NoProfile -Command "if (Get-Process PokeV-Recomp -EA 0 | ? Path -eq '$EXEW') {1} else {0}" |
             tr -d '\r'; }
 off=$(size); [ "$FROM" = start ] && off=0
 base=0; [ "$off" -gt 0 ] && base=$(head -c "$off" "$L" | wc -l)
@@ -41,8 +41,8 @@ run=$(running)
     function out(s) { printf "L%d %s\n", NR - skip + base, substr(s, 1, 400); fflush() }
     /^\001BASE/   { base = $2; skip = NR; print "[watcher] following play.log from line " base + 1 ($3 ? ", the game is running" : ", the game is not running"); fflush(); next }
     /^\001NEWLOG/ { base = 0; skip = NR; best = 0; last = 0; closed = 0; print "[watcher] new play.log: the game started again"; fflush(); next }
-    /^\001RUN/    { if ($2) print "[watcher] lasrecomp.exe started"
-                    else print "[watcher] lasrecomp.exe exited" (closed ? " (window closed)" : " WITHOUT \"window closed\": a crash? the log ends at L" NR - skip - 1 + base)
+    /^\001RUN/    { if ($2) print "[watcher] PokeV-Recomp.exe started"
+                    else print "[watcher] PokeV-Recomp.exe exited" (closed ? " (window closed)" : " WITHOUT \"window closed\": a crash? the log ends at L" NR - skip - 1 + base)
                     fflush(); skip++; next }
     /^window closed/ { closed = 1; out($0); next }
     /^\[slow\]|^\[hitch\]|^\[vtxstate\]|^\[black\]|^\[shader\]|full-screen draw waited/ || /^FATAL|^\*\*\* |EXCEPTION|access violation|[Aa]ssert|VK_ERROR|device lost|out of memory|gave up|unimplemented/ { out($0); next }
