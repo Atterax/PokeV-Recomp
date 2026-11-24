@@ -892,10 +892,21 @@ static const char *builtin_src(const char *name, int *stage) {
                 "  return pow(clamp(1.0 - (d2 - d1) * 2.5, 0.0, 1.0), 4.0);\n"
                 "}\n"
                 "float caustic(vec2 p, float t) { return 0.65 * caustic_layer(p * 1.8, t) + 0.35 * caustic_layer(p * 3.1 + 5.0, t * 1.2); }\n"
+                // (water there - the depth changed - and level, by the same test as main's)
+                "bool level_px(vec2 u) {\n"
+                "  float a = depth_at(t0, u);\n"
+                "  if (!(a > depth_at(t1, u) + 1e-7)) return false;\n"
+                "  vec2 px = 1.0 / pc.sz.zw, ex = vec2(px.x, 0.0), ey = vec2(0.0, px.y);\n"
+                "  vec3 Q = wpos(u, a);\n"
+                "  vec3 Xa = Q - wpos(u - ex, depth_at(t0, u - ex)), Xb = wpos(u + ex, depth_at(t0, u + ex)) - Q;\n"
+                "  vec3 Ya = Q - wpos(u - ey, depth_at(t0, u - ey)), Yb = wpos(u + ey, depth_at(t0, u + ey)) - Q;\n"
+                "  vec3 N = cross(length(Xa) < length(Xb) ? Xa : Xb, length(Ya) < length(Yb) ? Ya : Yb);\n"
+                "  return abs(N.y) >= 0.98 * length(N);\n"
+                "}\n"
                 "void main() {\n"
                 "  vec2 uv = gl_FragCoord.xy / pc.sz.xy;\n"
                 "  float dn = depth_at(t0, uv), db = depth_at(t1, uv);\n"
-                "  if (!(dn > db + 1e-7)) discard;\n"  // (no water here: reversed depth, the nearer the larger)
+                "  if (!(dn > db + 1e-7)) { if (pc.prj.z > 2.5) { o = vec4(1.0, 0.0, 0.0, 1.0); return; } discard; }\n"  // (no water here: reversed depth, the nearer the larger)
                 "  mat4 vp = inverse(mat4(pc.m0, pc.m1, pc.m2, pc.m3));\n"
                 "  vec3 P = wpos(uv, dn);\n"
                 // (window panes are drawn just like water, and being upright they'd be all mirror to the straight-up normal
@@ -906,7 +917,17 @@ static const char *builtin_src(const char *name, int *stage) {
                 "  vec3 Xa = P - wpos(uv - ex, depth_at(t0, uv - ex)), Xb = wpos(uv + ex, depth_at(t0, uv + ex)) - P;\n"
                 "  vec3 Ya = P - wpos(uv - ey, depth_at(t0, uv - ey)), Yb = wpos(uv + ey, depth_at(t0, uv + ey)) - P;\n"
                 "  vec3 Ng = cross(length(Xa) < length(Xb) ? Xa : Xb, length(Ya) < length(Yb) ? Ya : Yb);\n"
-                "  if (abs(Ng.y) < 0.98 * length(Ng)) discard;\n"
+                // (a thin upright strip between level water on both sides - the seam where two of Scarlet / Violet's water
+                // meshes meet, a pixel wide - is water too: skipped, it showed as a line of the game's own water through
+                // the reflections, depth and caustics. A window pane is upright over far more than that, and stays out.
+                // LARECOMP_WATER_DEBUG=3: red no water, green not level)
+                "  if (abs(Ng.y) < 0.98 * length(Ng)) {\n"
+                "    vec2 e2x = 2.0 * ex, e2y = 2.0 * ey;\n"
+                "    if (!((level_px(uv - e2x) && level_px(uv + e2x)) || (level_px(uv - e2y) && level_px(uv + e2y)))) {\n"
+                "      if (pc.prj.z > 2.5) { o = vec4(0.0, 1.0, 0.0, 1.0); return; }\n"
+                "      discard;\n"
+                "    }\n"
+                "  }\n"
                 "  vec3 V = normalize(pc.cam.xyz - P);\n"
                 // (Z-A's water is level: straight up - the depth's own slope left thin lines at its triangles' seams -
                 // tilted by gentle moving ripples, prm.w the time)
