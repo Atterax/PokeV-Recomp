@@ -1,17 +1,49 @@
 """Native settings regression checks; no game files or player settings are used."""
 import os
 from pathlib import Path
+import platform
 import shlex
 import subprocess
 import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+def sdl3_flags():
+    arch = 'aarch64' if platform.machine() in ('arm64', 'aarch64') else 'x86_64'
+    candidates = [
+        ROOT / f'build/linux/{arch}/deps',
+        ROOT / 'build/deps-linux',
+        ROOT / 'build/deps',
+        ROOT / 'build/deps-win',
+        Path('/opt/homebrew/opt/sdl3'),
+        Path('/usr/local/opt/sdl3'),
+    ]
+    cflags, ldflags = [], []
+    for prefix in candidates:
+        if (prefix / 'include/SDL3').is_dir():
+            cflags.append(f'-I{prefix / "include"}')
+            lib = prefix / 'lib'
+            if lib.is_dir() and any(lib.glob('*SDL3*')):
+                ldflags.append(f'-L{lib}')
+                if os.name != 'nt':
+                    ldflags.append(f'-Wl,-rpath,{lib}')
+            break
+    ldflags.append('-lSDL3')
+    if sys.platform == 'darwin':
+        ldflags += ['-framework', 'CoreFoundation']
+    return cflags, ldflags
+
+
 with tempfile.TemporaryDirectory() as directory:
     directory = Path(directory)
     exe = directory / ('settings-test.exe' if os.name == 'nt' else 'settings-test')
+    sdl_cflags, sdl_ldflags = sdl3_flags()
     subprocess.run(shlex.split(os.environ.get('CC', 'clang')) +
-                   ['-std=gnu11', '-Iruntime', 'runtime/settings.c', 'runtime/cosmetic_colour.c', 'tools/test_settings.c', '-o', str(exe), '-lm'],
+                   ['-std=gnu11', '-Iruntime'] + sdl_cflags +
+                   ['runtime/settings.c', 'runtime/cosmetic_colour.c', 'tools/test_settings.c', '-o', str(exe), '-lm'] +
+                   sdl_ldflags,
                    cwd=ROOT, check=True)
     cases = [(setting, {}, code) for setting, code in
              [('zh-CN', 'zh-Hans'), ('zh-TW', 'zh-Hant'), ('zh-Hans', 'zh-Hans'),

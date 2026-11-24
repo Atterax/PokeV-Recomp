@@ -1,18 +1,46 @@
 """Compile/run the production cache logic with synthetic inputs."""
 import os
 from pathlib import Path
+import platform
 import shlex
 import subprocess
 import tempfile
 
 root=Path(__file__).resolve().parent.parent
+
+
+def sdl3_flags():
+    arch = 'aarch64' if platform.machine() in ('arm64', 'aarch64') else 'x86_64'
+    candidates = [
+        root / f'build/linux/{arch}/deps',
+        root / 'build/deps-linux',
+        root / 'build/deps',
+        root / 'build/deps-win',
+        Path('/opt/homebrew/opt/sdl3'),
+        Path('/usr/local/opt/sdl3'),
+    ]
+    cflags, ldflags = [], []
+    for prefix in candidates:
+        if (prefix / 'include/SDL3').is_dir():
+            cflags.append(f'-I{prefix / "include"}')
+            lib = prefix / 'lib'
+            if lib.is_dir() and any(lib.glob('*SDL3*')):
+                ldflags.append(f'-L{lib}')
+                if os.name != 'nt':
+                    ldflags.append(f'-Wl,-rpath,{lib}')
+            break
+    ldflags.append('-lSDL3')
+    return cflags, ldflags
+
+
 with tempfile.TemporaryDirectory() as tmp:
     tmp=Path(tmp).absolute()
     exe=tmp/('cache-test.exe' if os.name=='nt' else 'cache-test')
     cxx=shlex.split(os.environ.get('CXX','clang++'))
-    subprocess.run(cxx+['-x','c++','-std=c++17','-pthread','-Iruntime',
+    sdl_cflags, sdl_ldflags = sdl3_flags()
+    subprocess.run(cxx+['-x','c++','-std=c++17','-pthread','-Iruntime']+sdl_cflags+[
                         'runtime/build_cache.cpp','tools/test_build_cache.cpp',
-                        '-o',str(exe)],cwd=root,check=True)
+                        '-o',str(exe)]+sdl_ldflags,cwd=root,check=True)
     data = tmp/'data'
     if os.name == 'nt':
         target, linked = tmp/'target', tmp/'junction'
