@@ -1644,3 +1644,5 @@ int ui_run(void) {
         layer.drawableSize = CGSizeMake(w, h);
     }
 }
+
+void debug_frame_after_present(uint64_t frame) { (void)frame; }

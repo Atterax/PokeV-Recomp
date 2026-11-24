@@ -162,6 +162,8 @@ jobs:
       # ---- Automated Tests ----
       - name: Run Automated Tests
         shell: bash
+        env:
+          PYTHONUTF8: "1"
         run: |
           set -euo pipefail
           if [ "${{ matrix.platform }}" = "windows" ]; then
