@@ -172,11 +172,17 @@ static void terrain_distance(int world) {
 // then the settings, then the stand-ins (after what they rely on). Every value is written only while it still holds
 // what was read or last written; the game's own are kept by address and put back at "Game's". Off:
 // LARECOMP_WORLD_STANDINS=0.
+#if defined(__x86_64__) || defined(_M_X64)
 #include <immintrin.h>
+#endif
 #include <pthread.h>
 #include <time.h>
 #ifdef _WIN32
 #include <windows.h>
+#elif defined(__APPLE__)
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+#include <unistd.h>
 #else
 #include <sys/uio.h>
 #include <unistd.h>
@@ -192,6 +198,12 @@ static bool self_read(uint64_t a, void *to, size_t n, size_t *got) {
     BOOL ok = ReadProcessMemory(GetCurrentProcess(), (void *)(uintptr_t)a, to, n, &r);
     *got = r;
     return ok && r == n;
+#elif defined(__APPLE__)
+    mach_vm_size_t r = 0;
+    kern_return_t kr = mach_vm_read_overwrite(mach_task_self(), (mach_vm_address_t)a, (mach_vm_size_t)n,
+                                              (mach_vm_address_t)(uintptr_t)to, &r);
+    *got = (size_t)r;
+    return kr == KERN_SUCCESS && r == n;
 #else
     struct iovec local = {to, n}, remote = {(void *)(uintptr_t)a, n};
     ssize_t r = process_vm_readv(getpid(), &local, 1, &remote, 1, 0);
@@ -343,7 +355,7 @@ static bool far_object_read(uint64_t f, const uint64_t *w) {  // (w: the 0x390 b
 static struct { uint64_t f, k1, k2; bool is_far; } far_seen[65536];
 static bool far_object(uint64_t f) {
     uint64_t w[0x390 / 8];
-    if (!rpm(f - 0x390, w, sizeof w)) return false;
+    if (f < 0x390 || !rpm(f - 0x390, w, sizeof w)) return false;
     uint64_t k1 = w[(0x390 - 0x38) / 8] ^ w[(0x390 - 0xf0) / 8] ^ w[(0x390 - 0x310) / 8], k2 = w[(0x390 - 0x30) / 8];
     uint32_t h = (uint32_t)((f >> 3) * 0x9E3779B1u) >> 16;
     if (far_seen[h].f == f && far_seen[h].k1 == k1 && far_seen[h].k2 == k2) return far_seen[h].is_far;
@@ -385,12 +397,25 @@ static volatile bool clod_hurry;  // (the game thread: a field is loading - look
 // the vtables: 0x7_xxxx_xxxx) or one two words before a 32-bit 1 (a settings block's floats). The rest - nearly all of
 // the ~4.6 GB in a town - is passed over 4 words at a time: word by word it was ~0.8 s of a ~1.3 s scan, a core's
 // thread nearly always busy while a field streams in, ~1 fps at World detail 4x. Reads p[0..48).
+#if defined(__x86_64__) || defined(_M_X64)
 __attribute__((target("avx2"))) static inline unsigned clod_block(const uint8_t *p) {
     __m256i w = _mm256_loadu_si256((const __m256i *)p), w2 = _mm256_loadu_si256((const __m256i *)(p + 16));
     __m256i ptr = _mm256_cmpeq_epi64(_mm256_srli_epi64(w, 36), _mm256_set1_epi64x(7));
     __m256i one = _mm256_cmpeq_epi64(_mm256_and_si256(w2, _mm256_set1_epi64x(0xffffffff)), _mm256_set1_epi64x(1));
     return (unsigned)_mm256_movemask_pd(_mm256_castsi256_pd(_mm256_or_si256(ptr, one)));
 }
+#else
+static inline unsigned clod_block(const uint8_t *p) {
+    unsigned m = 0;
+    for (int k = 0; k < 4; k++) {
+        uint64_t w, w2;
+        memcpy(&w, p + k * 8, 8);
+        memcpy(&w2, p + 16 + k * 8, 8);
+        if ((w >> 36) == 7 || (uint32_t)w2 == 1) m |= 1u << k;
+    }
+    return m;
+}
+#endif
 
 static void *clod_thread(void *unused) {
     (void)unused;
@@ -518,11 +543,12 @@ static void *clod_thread(void *unused) {
 void rt_sv_npc_detail(void) {
     static int env_people = -2, env_pokemon = -2;
     static bool clod_started;
-    if (g_modules[0].base) terrain_distance(rt_sv_world_part("TERRAIN"));
-    {   // (a field loading: the GlobalHeap's use jumps - clod_thread looks back to back for a while)
+    Module *m = &g_modules[0];
+    if (m->base) terrain_distance(rt_sv_world_part("TERRAIN"));
+    if (m->base && 0x4763918ull + 0x40 <= m->data_off + m->data_size) {  // (a field loading: the GlobalHeap's use jumps - clod_thread looks back to back for a while)
         static uint64_t last_used;
         static int frames;
-        uint64_t used = G64(g_modules[0].base + 0x4763918ull + 0x38);
+        uint64_t used = G64(m->base + 0x4763918ull + 0x38);
         static bool field;
         if (!field && used > (512ull << 20)) { field = true; clod_hurry = true; }  // (the field's first load)
         if (++frames % 30 == 0) {
@@ -530,7 +556,7 @@ void rt_sv_npc_detail(void) {
             last_used = used;
         }
     }
-    if (!clod_started && g_modules[0].base && rt_sv_world_part("STANDINS") > 1) {  // (started once anything is to change)
+    if (!clod_started && m->base && rt_sv_world_part("STANDINS") > 1) {  // (started once anything is to change)
         clod_started = true;
         pthread_t th;
         if (!pthread_create(&th, NULL, clod_thread, NULL)) pthread_detach(th);
@@ -540,7 +566,6 @@ void rt_sv_npc_detail(void) {
     static uint64_t fac_mgr;     // the manager whose factor table was written
     static float fac_game[12];   // its own factors
     static float fac_wrote;      // what was written there last
-    Module *m = &g_modules[0];
     if (!m->base || LOD_GLOBAL + 8 > m->data_off + m->data_size) return;
     uint64_t p = G64(m->base + LOD_GLOBAL);
     if (!gptr(p) || !gptr(p = G64(p)) || !gptr(p = G64(p + 0x38)) || !gptr(p = G64(p + 0x50))) return;
