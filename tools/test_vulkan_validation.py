@@ -2,6 +2,7 @@
 import argparse
 import os
 from pathlib import Path
+import platform
 import shlex
 import subprocess
 import tempfile
@@ -28,11 +29,17 @@ static VkDebugUtilsMessengerEXT messenger;
 static const char *scenario;
 static unsigned instance_calls, callback_calls;
 static bool requested_validation;
+#define ENV(name) getenv(name)
 #define LOG(...) fprintf(stderr,__VA_ARGS__)
 #define FATAL(...) do { fprintf(stderr,__VA_ARGS__); fflush(stderr); _Exit(19); } while (0)
 static const char *const *SDL_Vulkan_GetInstanceExtensions(Uint32 *count) {
     static const char *extensions[]={"VK_KHR_surface"}; *count=1; return extensions;
 }
+VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateInstanceExtensionProperties(const char *layer, uint32_t *count, VkExtensionProperties *props) {
+    (void)layer, (void)props; *count=0; return VK_SUCCESS;
+}
+static void vk_dlaa_instance_exts(const char **ext, uint32_t *n_ext, uint32_t cap) { (void)ext, (void)n_ext, (void)cap; }
+static void ab_messenger_create(void) {}
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateInstance(const VkInstanceCreateInfo *info, const VkAllocationCallbacks *allocator, VkInstance *instance) {
     (void)allocator; instance_calls++;
     assert(info->pApplicationInfo->apiVersion==VK_API_VERSION_1_3);
@@ -81,7 +88,13 @@ with tempfile.TemporaryDirectory(prefix='vulkan-validation-',dir=build) as direc
     temp=Path(directory).resolve(); assert temp.is_relative_to(build)
     cfile=temp/'validation.c'; cfile.write_text(harness)
     exe=temp/('validation.exe' if os.name=='nt' else 'validation')
-    subprocess.run(shlex.split(os.environ.get('CC','clang'))+['-std=gnu11','-O1',str(cfile),'-o',str(exe)],check=True)
+    arch = 'aarch64' if platform.machine() in ('arm64', 'aarch64') else 'x86_64'
+    vk_inc = []
+    for inc in (root / f'build/linux/{arch}/deps/include', root / 'build/deps-linux/include', root / 'build/deps/include'):
+        if (inc / 'vulkan/vulkan.h').is_file():
+            vk_inc = [f'-I{inc}']
+            break
+    subprocess.run(shlex.split(os.environ.get('CC','clang'))+['-std=gnu11','-O1',*vk_inc,str(cfile),'-o',str(exe)],check=True)
     cases=[('success','off',0,''),('success','strict',0,''),('warning','strict',0,''),('error','optional',0,''),
            ('error','strict',1,'synthetic validation error'),('limit-error','strict',1,'synthetic validation error'),
            ('success','strict-alone',0,''),

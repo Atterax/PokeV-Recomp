@@ -8,6 +8,7 @@ import ctypes as ct
 import hashlib
 import os
 from pathlib import Path
+import platform
 import shlex
 import shutil
 import signal
@@ -17,6 +18,32 @@ import tempfile
 
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+def sdl3_flags():
+    arch = 'aarch64' if platform.machine() in ('arm64', 'aarch64') else 'x86_64'
+    candidates = [
+        ROOT / f'build/linux/{arch}/deps',
+        ROOT / 'build/deps-linux',
+        ROOT / 'build/deps',
+        ROOT / 'build/deps-win',
+        Path('/opt/homebrew/opt/sdl3'),
+        Path('/usr/local/opt/sdl3'),
+    ]
+    cflags, ldflags = [], []
+    for prefix in candidates:
+        if (prefix / 'include/SDL3').is_dir():
+            cflags.append(f'-I{prefix / "include"}')
+            lib = prefix / 'lib'
+            if lib.is_dir() and any(lib.glob('*SDL3*')):
+                ldflags.append(f'-L{lib}')
+                if os.name != 'nt':
+                    ldflags.append(f'-Wl,-rpath,{lib}')
+            break
+    ldflags.append('-lSDL3')
+    return cflags, ldflags
+
+
 BRIDGE = r'''
 #include "platform.h"
 #include <chrono>
@@ -36,6 +63,7 @@ extern "C" bool rt_resource(const char *,const char *dev,char *out,size_t n) {
     return std::filesystem::exists(std::filesystem::u8path(p)) && snprintf(out,n,"%s",p.c_str())<(int)n;
 }
 extern "C" bool rt_dev_mode() { return false; }
+extern "C" bool gamelib_old_cpu(void) { return false; }
 extern "C" uint64_t plat_now_ns() { return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 extern "C" void plat_sleep_until_ns(uint64_t t) { auto now=plat_now_ns(); if(t>now)std::this_thread::sleep_for(std::chrono::nanoseconds(t-now)); }
 extern "C" intptr_t plat_spawn(const char *const *a,const char *l,bool append) { return start_cb(a,l,append); }
@@ -87,8 +115,9 @@ with tempfile.TemporaryDirectory() as temporary:
                            '-c',source,'-o',str(obj)],cwd=ROOT,check=True)
     bridge=tmp/'bridge.cpp'; bridge.write_text(BRIDGE)
     libfile=tmp/('scheduler.dll' if os.name=='nt' else 'scheduler.so')
-    subprocess.run(cxx+['-shared','-fPIC','-pthread','-std=c++17','-Iruntime','-x','c++',str(bridge),
-                        'runtime/build_cache.cpp','-x','none',*objects,'-o',str(libfile)]+
+    sdl_cflags, sdl_ldflags = sdl3_flags()
+    subprocess.run(cxx+['-shared','-fPIC','-pthread','-std=c++17','-Iruntime']+sdl_cflags+['-x','c++',str(bridge),
+                        'runtime/build_cache.cpp','-x','none',*objects,'-o',str(libfile)]+sdl_ldflags+
                    (['-Wl,--export-all-symbols'] if os.name=='nt' else []),cwd=ROOT,check=True)
     dll_search = os.add_dll_directory(str(Path(compiler).parent)) if os.name == 'nt' else None
     library=ct.CDLL(str(libfile))

@@ -2,6 +2,7 @@
 Builds tools/test_delete_guard.c with the real paths.c and this platform's plat_remove_tree; scratch folders only."""
 import os
 from pathlib import Path
+import platform
 import shlex
 import shutil
 import subprocess
@@ -13,16 +14,25 @@ plat = 'windows' if os.name == 'nt' else 'macos' if sys.platform == 'darwin' els
 flags = []
 deps = os.environ.get('DEPS')  # (a prefix with SDL3, as for make DEPS=)
 if deps:
-    flags = [f'-I{deps}/include', f'-L{deps}/lib', f'-Wl,-rpath,{deps}/lib', '-lSDL3']
+    flags = [f'-I{deps}/include', f'-L{deps}/lib'] + ([f'-Wl,-rpath,{deps}/lib'] if os.name != 'nt' else []) + ['-lSDL3']
 elif shutil.which('pkg-config') and subprocess.run(['pkg-config', '--exists', 'sdl3']).returncode == 0:
     flags = shlex.split(subprocess.run(['pkg-config', '--cflags', '--libs', 'sdl3'], capture_output=True, text=True,
                                        check=True).stdout)
-elif sys.platform == 'darwin':
-    brew = subprocess.run(['brew', '--prefix'], capture_output=True, text=True).stdout.strip() or '/opt/homebrew'
-    flags = [f'-I{brew}/include', f'-L{brew}/lib', '-lSDL3']
+else:
+    arch = 'aarch64' if platform.machine() in ('arm64', 'aarch64') else 'x86_64'
+    for prefix in (ROOT / f'build/linux/{arch}/deps', ROOT / 'build/deps-linux', ROOT / 'build/deps',
+                   ROOT / 'build/deps-win', Path('/opt/homebrew/opt/sdl3'), Path('/usr/local/opt/sdl3')):
+        if (prefix / 'include/SDL3').is_dir():
+            flags = [f'-I{prefix}/include', f'-L{prefix}/lib'] + ([f'-Wl,-rpath,{prefix}/lib'] if os.name != 'nt' else []) + ['-lSDL3']
+            break
+    if not flags and sys.platform == 'darwin':
+        brew = subprocess.run(['brew', '--prefix'], capture_output=True, text=True).stdout.strip() or '/opt/homebrew'
+        flags = [f'-I{brew}/include', f'-L{brew}/lib', '-lSDL3']
+    elif not flags:
+        flags = ['-lSDL3']
 extra = {'macos': ['-framework', 'CoreFoundation'], 'linux': ['-pthread', '-ldl'],
          'windows': ['-D_FILE_OFFSET_BITS=64', '-D_POSIX_THREAD_SAFE_FUNCTIONS', '-D_CRT_RAND_S',
-                     '-DWIN32_LEAN_AND_MEAN', '-DNOMINMAX', '-lwinmm', '-lole32', '-lshell32', '-lcomdlg32', '-luuid', '-ladvapi32']}[plat]
+                     '-DWIN32_LEAN_AND_MEAN', '-DNOMINMAX', '-lwinmm', '-lgdi32', '-lole32', '-lshell32', '-lcomdlg32', '-luuid', '-ladvapi32']}[plat]
 with tempfile.TemporaryDirectory() as directory:
     directory = Path(directory)
     exe = directory / ('delete-guard-test.exe' if os.name == 'nt' else 'delete-guard-test')
