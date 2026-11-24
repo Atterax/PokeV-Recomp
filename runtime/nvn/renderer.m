@@ -815,7 +815,7 @@ static void begin_pass(void) {
             rp.stencilAttachment.storeAction = MTLStoreActionStore;
         }
         if (e && e->clear_on) { e->clear_on = false; td_pending--; stat_clears_as_load++; }
-        if (!w) { renderer_texture_scale(st.rt.depth, &pass_sx, &pass_sy); w = (int)tex.width; h = (int)tex.height; }
+        if (!w) { renderer_texture_scale(st.rt.depth, &pass_sx, &pass_sy); w = (int)tex.width; }
     }
     pass_rt_w = pass_rt_h = 0;
     if (!w) {
