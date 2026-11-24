@@ -1956,7 +1956,9 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
     }
     static long shot_from = -1;
     if (shot_from < 0) { const char *e = getenv("LARECOMP_SCREENSHOT_FROM"); shot_from = e ? atol(e) : 0; }
-    if (shot_every && frame % shot_every == 0 && (long)frame >= shot_from) {
+    static long shot_to = -1;  // (LARECOMP_SCREENSHOT_TO: the series' last frame)
+    if (shot_to < 0) { const char *e = getenv("LARECOMP_SCREENSHOT_TO"); shot_to = e ? atol(e) : 0; }
+    if (shot_every && frame % shot_every == 0 && (long)frame >= shot_from && (!shot_to || (long)frame <= shot_to)) {
         char path[256];
         if (shot_from) mkdir("build/frames", 0755);
         snprintf(path, sizeof path, shot_from ? "build/frames/frame_%05llu.png" : "build/frame_%05llu.png",

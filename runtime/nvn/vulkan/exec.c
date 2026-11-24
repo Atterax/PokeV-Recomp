@@ -2052,11 +2052,13 @@ typedef struct {
     bool vs_uses_vid;
     _Atomic int state;  // 0 building, 1 ready, 2 failed
     uint64_t prep_vh, prep_fh;  // (prepared programs: their code hashes, for LARECOMP_PREP_CHECK)
+    uint64_t sess_vh, sess_fh, sess_ck;  // (sess_progs: its code hashes and content key, entered once translated)
     ShaderFp fp[2];             // (stale-program detector, shader_prep.h; compute: [0]; touched by the replay only)
     struct PipeMemo *pmemo;     // (render thread) draw_'s pipeline key memo for this program
     bool reuse;                 // set reuse (stage_set): some uniform buffers are dynamic, sets are kept while their contents repeat
     struct SetCache *scache[2]; // (render thread) stage_set's last set per set index
 } Prog;
+static void sess_put_masked(Prog *p);
 
 // ---- descriptor set reuse (graphics programs; port of vk-draw-cpu-2 d50bbce)
 // Every draw allocated and wrote two descriptor sets (~20 descriptors) although most repeat the previous draw's of
@@ -2297,6 +2299,7 @@ static bool translate_program_now(Prog *p) {
         return false;
     }
     p->vs_uses_vid = strstr(p->vi->msl, "gl_VertexIndex") != NULL;
+    sess_put_masked(p);
     return true;
 }
 
@@ -2460,9 +2463,73 @@ static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
     return p;
 }
 
+// Programs and compute programs built this run, found again by content (as the prepared ones are) before one is
+// translated and compiled anew. A battle in Scarlet / Violet ("Battle", the move-select camera) put ~60 of the field's
+// programs through a new build at once, and while they built their draws were skipped (the scene wait budget,
+// wait_scene, gone in the first few): for a frame or two the battlefield's ground, the trainer and what hides the far
+// land were missing - the far land seen through where the ground was, then the ground unlit (black). Once each battle.
+//   - The same shaders at another code address are the same program: the game loads a battle's shaders into new
+//     memory each time (sess_progs by the content key).
+//   - A key differing only in slots the shaders don't read is the same program: the stencil / integer slot masks
+//     (stencil_slots) are taken from all 32 bound texture slots, and at that moment the lighting's stencil view
+//     (slot 28) is bound while the ground's shaders draw - they never read it, and the translation (translate.c, by
+//     the slots each texture of a shader is read from) comes out the same. Once a program is translated, it is also
+//     found by its key with only the slots its shaders read (sess_put_masked / sess_get_masked); a shader reading a
+//     texture through a handle it loads (bindless) counts as reading every slot. The programs prepared before the
+//     game (shader_prep.h) are entered so too: their records carry no stencil / integer slots, so a draw with the
+//     lighting's view bound found none of them - with a warm cache the first battle after starting still went black.
+// LARECOMP_VK_SESSION_PROGRAMS=0: off (built again, as before).
+static PrepEnt *sess_progs, *sess_cs, *sess_slots;  // content key -> Prog / CsProg; stage code hash -> its slots + 1<<32
+static size_t sess_progs_cap, sess_cs_cap, sess_slots_cap, sess_progs_n, sess_cs_n, sess_slots_n;
+static bool sess_on(void) {
+    static _Atomic int on = -1;
+    int v = atomic_load_explicit(&on, memory_order_relaxed);
+    if (v < 0) {
+        v = !ENV("LARECOMP_VK_SESSION_PROGRAMS") || atoi(ENV("LARECOMP_VK_SESSION_PROGRAMS")) != 0;
+        atomic_store_explicit(&on, v, memory_order_relaxed);
+    }
+    return v != 0;
+}
+static uint32_t sess_used_slots(const ShaderInfo *si) {  // the texture handle slots a translated shader reads
+    uint32_t m = 0;
+    for (int i = 0; si && i < si->ntex; i++) {
+        if (si->tex[i].bindless) return ~0u;
+        int hs = ((int)si->tex[i].handle_offset - 0x20) / 8;
+        if (hs >= 0 && hs < 32) m |= 1u << hs;
+    }
+    return m;
+}
+static uint64_t sess_masked_key(uint64_t vh, uint64_t fh, uint32_t vm, uint32_t fm, const ShaderKey *vkey, const ShaderKey *fkey) {
+    ShaderKey v = *vkey, f = *fkey;
+    v.stencil_slots &= vm, v.sint_slots &= vm;
+    f.stencil_slots &= fm, f.sint_slots &= fm;
+    f.vs_out_mask = 0;  // (the translation sets it on its own copy: lookups have none)
+    return prog_content_key(vh, fh, &v, &f) ^ 0x5e55a5e55a5e55a5ull;
+}
+static bool sess_slots_of(uint64_t h, uint32_t *m) {
+    uintptr_t v = (uintptr_t)PREP_GET(sess_slots, h);
+    if (!v) return false;
+    *m = (uint32_t)v;
+    return true;
+}
+// (translator thread) a program just translated: found from now on by its content and by the slots its shaders read.
+// Not before: its translation reads the game's code at its own address, which may be freed by then (another battle).
+static void sess_put_masked(Prog *p) {
+    if (!sess_on() || !p->sess_vh || !p->sess_fh) return;
+    if (p->sess_ck) PREP_PUT(sess_progs, p->sess_ck, p);  // (a prepared one is in prep_progs by it already)
+    uint32_t vm = sess_used_slots(p->vi), fm = sess_used_slots(p->fi);
+    PREP_PUT(sess_slots, p->sess_vh, (void *)(uintptr_t)((uint64_t)vm | 1ull << 32));
+    PREP_PUT(sess_slots, p->sess_fh, (void *)(uintptr_t)((uint64_t)fm | 1ull << 32));
+    PREP_PUT(sess_progs, sess_masked_key(p->sess_vh, p->sess_fh, vm, fm, &p->vkey, &p->fkey), p);
+}
+static Prog *sess_get_masked(uint64_t vh, uint64_t fh, const ShaderKey *vkey, const ShaderKey *fkey) {
+    uint32_t vm, fm;
+    if (!sess_slots_of(vh, &vm) || !sess_slots_of(fh, &fm)) return NULL;
+    return PREP_GET(sess_progs, sess_masked_key(vh, fh, vm, fm, vkey, fkey));
+}
 static Prog *get_program_(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
     if (!(np->stage_mask & 1)) return NULL;  // (no fragment stage: depth only - maxwell_empty_fragment)
-    uint64_t h = 0xcbf29ce484222325ull, fp[2];
+    uint64_t h = 0xcbf29ce484222325ull, fp[2], sess_ck = 0;
     for (int i = 0; i < 2; i++) {
         uint64_t a = np->stages[i].code_addr;
         fp[i] = code_fp(&np->stages[i]);
@@ -2484,16 +2551,23 @@ static Prog *get_program_(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
         uint64_t vh = shader_stage_hash(&np->stages[0]), fh = shader_stage_hash(&np->stages[1]);
         uint64_t ck = prog_content_key(vh, fh, vkey, fkey);
         Prog *pp = vh && fh && prep_progs_n ? PREP_GET(prep_progs, ck) : NULL;
+        if (!pp && vh && fh && sess_on()) {  // (built earlier: elsewhere, or with another unread slot)
+            pp = PREP_GET(sess_progs, ck);
+            if (!pp) pp = sess_get_masked(vh, fh, vkey, fkey);
+        }
         if (pp) {
             kv_set(&prog_kv, slot, h, pp);
             prog_fp_check(pp, np);
             return pp;
         }
         shader_first_visit("program", vh, fh, ck);
+        sess_ck = vh && fh ? ck : 0;
     }
     Prog *p = calloc(1, sizeof *p);
     prog_fp_check(p, np);  // (takes the fingerprint)
     kv_set(&prog_kv, slot, h, p);
+    if (sess_ck && sess_on())  // (entered in sess_progs once translated: sess_put_masked)
+        p->sess_ck = sess_ck, p->sess_vh = shader_stage_hash(&np->stages[0]), p->sess_fh = shader_stage_hash(&np->stages[1]);
     note_code(&np->stages[0], fp[0], "vs");
     note_code(&np->stages[1], fp[1], "fs");
     for (int i = 0; i < 2; i++) {
@@ -6110,6 +6184,7 @@ static CsProg *compute_program(NvnProgram *np) {
     }
     uint64_t ch = shader_stage_hash(ss);
     CsProg *cp = ch && prep_cs_n ? PREP_GET(prep_cs, cs_content_key(ch, local)) : NULL;  // prepared before the game
+    if (!cp && ch && sess_on()) cp = PREP_GET(sess_cs, cs_content_key(ch, local));  // (built this run)
     if (cp) {
         cs_tab_put(at, ss->code_addr, fp, cp);
         shader_fp_check(&cp->p.fp[0], ss, "cs");
@@ -6121,6 +6196,7 @@ static CsProg *compute_program(NvnProgram *np) {
     cp->code = ss->code_addr;  // (for the build logs)
     note_code(ss, fp, "cs");
     cs_tab_put(at, ss->code_addr, fp, cp);
+    if (ch && sess_on()) PREP_PUT(sess_cs, cs_content_key(ch, local), cp);
     memcpy(cp->local, local, sizeof local);
     if (!translate_compute(cp, (const uint8_t *)(uintptr_t)ss->code_addr, ss->const_offset ? ss->const_offset : 0x10000, ss->code_addr))
         return cp;
@@ -6241,6 +6317,8 @@ bool renderer_prepare(const ShaderRec *r, const ShaderBlob *vsb, const ShaderBlo
         p->vkey = vkey;
         p->fkey = fkey;
         p->prep_vh = r->vs, p->prep_fh = r->fs;
+        p->sess_vh = r->vs, p->sess_fh = r->fs;  // (also found by the slots its shaders read: sess_put_masked - a
+                                                 // record has no stencil / integer slots, the draws often do)
         bool ok = translate_program_now(p);
         p->code[0] = p->code[1] = 0;  // (the game files' copies are gone after this call)
         PREP_PUT(prep_progs, ck, p);  // (failed ones too: the game then skips them as it would its own)
