@@ -973,6 +973,11 @@ static const char *builtin_src(const char *name, int *stage) {
                 "    vec2 q = to_uv(vp, Q, dz);\n"
                 "    if (any(lessThan(q, vec2(0.0))) || any(greaterThan(q, vec2(1.0))) || dz <= 0.0) break;\n"
                 "    float ds = depth_at(t1, q);\n"
+                // (water drawn there, and the ray behind the bed under it - the depth before the water: a stream climbing
+                // away from the camera, Scarlet / Violet's aren't level. What is under water is never in a reflection:
+                // taken as a hit, it mirrored the stones in a stream's far part, which looked dry. Passed by - not a hit,
+                // not hidden -: the ray goes on to the bank or the sky beyond)
+                "    if (ds > dz && depth_at(t0, q) > ds + 1e-7) { t *= 1.14; continue; }\n"
                 "    if (n_after > 0.0 || ds > dz) n_after += 1.0;\n"
                 "    if (ds > dz) {\n"  // (the scene is in front of the ray here: it passed behind something)
                 "      vec3 S = wpos(q, ds);\n"
