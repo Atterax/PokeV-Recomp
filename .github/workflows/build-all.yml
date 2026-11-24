@@ -50,7 +50,8 @@ jobs:
               mingw-w64-ucrt-x86_64-shaderc \
               mingw-w64-ucrt-x86_64-spirv-tools \
               mingw-w64-ucrt-x86_64-pkgconf \
-              mingw-w64-ucrt-x86_64-vulkan-memory-allocator; then
+              mingw-w64-ucrt-x86_64-vulkan-memory-allocator \
+              mingw-w64-ucrt-x86_64-opus; then
               echo "Pacman packages installed successfully!"
               exit 0
             fi

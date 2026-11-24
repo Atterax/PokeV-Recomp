@@ -43,6 +43,7 @@ static uint32_t work_size(uint32_t channels, uint32_t streams) {
 static Opus *opus_open(uint32_t rate, uint32_t channels, uint32_t streams, uint32_t coupled, const uint8_t *mapping) {
     if (!rate_ok(rate) || !channels || channels > 255) return NULL;
     Opus *o = calloc(1, sizeof *o);
+    if (!o) return NULL;
     o->rate = rate, o->channels = channels;
     int err = OPUS_OK;
     if (mapping) o->ms = opus_multistream_decoder_create((opus_int32)rate, (int)channels, (int)streams, (int)coupled, mapping, &err);
