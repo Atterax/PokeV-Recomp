@@ -92,7 +92,7 @@ static const char *build_version(const uint8_t id[8]) { return game_identity_sup
 // from an extracted exefs + romfs (a romfs/ folder): every supported build is a packaged one (no region_common/)
 static bool build_is_za(const uint8_t id[8]) { return build_version(id) != NULL; }
 // The release tag this build is (also names the release files; Makefile / tools/bundle_macos.sh / make_dmg.sh read
-// it): ZA Recomp's v<major>.<minor>.<patch> (Hexveil404/PokeZ-ARecomp releases).
+// it): PokeV-Recomp's v<major>.<minor>.<patch> (didslima/PokeV-Recomp releases).
 #define LARECOMP_VERSION "v0.0.28"
 extern "C" const char *rt_version(void) { return LARECOMP_VERSION; }  // (runtime/main.c: the log's first line)
 extern "C" const char *larecomp_version(void) { return LARECOMP_VERSION; }  // (the shader caches' tag)
@@ -136,7 +136,7 @@ static std::string g_update_tag;  // a newer release's tag (g_update_lock)
 static std::string g_update_url;  // its Windows zip (browser_download_url: the download counts on GitHub as a click)
 static long long g_update_size;
 static pthread_mutex_t g_update_lock = PTHREAD_MUTEX_INITIALIZER;
-#define UPDATE_ASSET "ZA-Recomp-windows.zip"
+#define UPDATE_ASSET "PokeV-Recomp-windows-x64.zip"
 
 static void *update_thread(void *) {
     return NULL;  // Standalone release: external Z-A update checks disabled

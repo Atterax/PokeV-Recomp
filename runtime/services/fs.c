@@ -826,7 +826,7 @@ static void storage(Service *s, IpcReq *req, IpcResp *resp) {
         uint64_t t0 = plat_now_ns();
         ssize_t n = romfs_read((uint8_t *)(uintptr_t)b->addr, size, off);
         uint64_t t1 = plat_now_ns();
-        if (n < 0) LOG("[fs] storage read failed at %llx: %s\n", off, strerror(errno));
+        if (n < 0) LOG("[fs] storage read failed at %llx: %s\n", (unsigned long long)off, strerror(errno));
         {   // (debug) LARECOMP_LOG_READS=<file>: every read as "<RomFS path> <offset in the file> <size> <ms since the
             // first read> <us it took>"
             static FILE *rf;
@@ -854,7 +854,7 @@ static void storage(Service *s, IpcReq *req, IpcResp *resp) {
         static uint64_t reads, bytes;
         reads++;
         bytes += size;
-        if ((reads & (reads - 1)) == 0) LOG("[fs] romfs reads: %llu (%llu KB)\n", reads, bytes >> 10);
+        if ((reads & (reads - 1)) == 0) LOG("[fs] romfs reads: %llu (%llu KB)\n", (unsigned long long)reads, (unsigned long long)(bytes >> 10));
         break;
     }
     case 4: OUT(uint64_t, 0) = ov_n ? ov_end : st->size; resp_size(resp, 8); break;  // GetSize
