@@ -7749,6 +7749,7 @@ static void objmv_replay(TexBackend *mvb, VkImageView zv, uint32_t w, uint32_t h
 static void objmv_check(TexBackend *sb, TexBackend *mvb, uint32_t w, uint32_t h, bool cam);
 static bool water_is_surface(Prog *pr);
 static void water_before(void);
+static void water_surface_cube(Prog *pr);
 static void draw_(CmdRec *r, bool indexed) {
     TLS_LOCALS();
 #define st_cur() st_l_
@@ -7876,7 +7877,7 @@ static void draw_(CmdRec *r, bool indexed) {
         if (st.rt.color[i] && ((st.channel_mask >> (i * 4)) & 0xF)) snapshots_invalidate(st.rt.color[i]);
     bool lighting = gtao_is_lighting(pr);
     if (lighting) gtao_before_lighting(pr);  // (GTAO from the scene depth, before the lighting reads the G-buffer)
-    if (water_is_surface(pr)) water_before();  // (the depth and the lit image before the water: water_apply)
+    if (water_is_surface(pr)) water_before(), water_surface_cube(pr);  // (the depth and the lit image before the water, and its cube: water_apply)
     begin_pass();
     if (lighting) gtao_mark(st.rt.ncolor ? st.rt.color[0] : NULL);
     VkCommandBuffer cb = vk_cmd();
@@ -10110,6 +10111,25 @@ static int water_mode(void) {
     return !water_reflect_on() ? 0 : env >= 0 ? env : g_settings.water_mode;
 }
 
+// Scarlet / Violet: the reflection cube off the picture is the one the game's own water draws bind (its biggest: a
+// 256 x 256 BC6H sky, clouds and all), not the lighting's (a 128 x 128 probe of the place). Kept per frame by
+// water_surface_cube from the water's draws (draw_); none: the lighting's, as in Z-A. LARECOMP_WATER_CUBE=0: the
+// lighting's always.
+static VkImageView water_cube;
+static uint32_t water_cube_w;
+static void water_surface_cube(Prog *pr) {
+    static int env = -2;
+    if (env == -2) env = water_env("LARECOMP_WATER_CUBE");
+    if (env == 0) return;
+    for (int i = 0; i < pr->fi->ntex; i++) {
+        NvnTexEntry *e = gtao_tex_entry(pr->fi, i);
+        if (e && pr->fi->tex[i].type == TEXTYPE_CUBE && e->tex->width > water_cube_w) {
+            VkImageView v = vk_view(e->tex, &e->view, e->has_view, false, TEXTYPE_CUBE);
+            if (v) water_cube = v, water_cube_w = e->tex->width;
+        }
+    }
+}
+
 // A water surface: blended onto the lit image, writing depth, reading a depth texture
 static bool water_is_surface(Prog *pr) {
     if (!water_on() || !gtao.target || st.rt.color[0] != gtao.target || !st.color_state[0] || !st.ds[0] || !st.ds[1] ||
@@ -10159,6 +10179,80 @@ static void water_before(void) {
     water.pending = true, water.target = gtao.target, water.depth = st.rt.depth;
 }
 
+// Scarlet / Violet: the reflection cube isn't at the brightness of the sky the game draws - one cube for the time of day
+// and weather it was made for, and at night 20-30 times brighter than the sky on screen (the water went white where the
+// mirror ray leaves the picture). Its brightness is matched to the drawn sky's: after the water pass, water_sky.frag
+// compares a grid of the picture's sky pixels (nothing drawn: depth 0) with the cube in their directions into a 1 x 1
+// image, read back a few frames later as planar_level_probe's height is; the scale follows that ratio smoothly (no
+// sky in the picture: the last one stays). LARECOMP_WATER_SKY_MATCH=0: the cube as it is (Z-A's, where it matches);
+// LARECOMP_WATER_SKY_LOG=1 logs every measurement.
+static struct { VkBuffer buf; VmaAllocation mem; float *ptr; uint64_t seq[4]; int next; float scale; bool have; } wsky;
+static bool water_sky_match_on(void) {
+    static int env = -2;
+    if (env == -2) env = water_env("LARECOMP_WATER_SKY_MATCH");
+    return env != 0;
+}
+static float water_sky_scale(void) { return water_sky_match_on() && wsky.have ? wsky.scale : 1.0f; }
+static void water_sky_probe(VkImageView dnow, VkImageView dpre, VkImageView cpre, VkImageView probe, const float *pc) {
+    if (!water_sky_match_on()) return;
+    if (!wsky.buf) {
+        VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = 4 * 16, .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT};
+        VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
+                                      .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT};
+        VmaAllocationInfo info;
+        if (vmaCreateBuffer(g_vk.vma, &bi, &ai, &wsky.buf, &wsky.mem, &info) != VK_SUCCESS) { wsky.buf = VK_NULL_HANDLE; return; }
+        wsky.ptr = info.pMappedData;
+    }
+    uint64_t done = vk_completed_seq();
+    for (int i = 0; i < 4; i++) {
+        int s = (wsky.next + i) & 3;
+        if (!wsky.seq[s] || wsky.seq[s] > done) continue;
+        vmaInvalidateAllocation(g_vk.vma, wsky.mem, (VkDeviceSize)s * 16, 16);
+        const float *v = wsky.ptr + s * 4;  // (the sky's summed luminance, the cube's, how many sky pixels)
+        static int dlog = -1;
+        if (dlog < 0) dlog = getenv("LARECOMP_WATER_SKY_LOG") != NULL;
+        if (dlog) LOG("[water] sky %.3f cube %.3f n %.0f\n", v[0], v[1], v[2]);
+        // (16 sky pixels at least; and not nearly the whole grid - a frame with hardly anything drawn yet, as while an
+        // area loads: water in the picture leaves far less sky than that)
+        if (v[2] >= 16 && v[2] < 0.9f * 48 * 27 && v[1] > 1e-6f && v[0] > 0) {
+            float r = v[0] / v[1];
+            r = r < 1e-3f ? 1e-3f : r > 4.0f ? 4.0f : r;
+            wsky.scale = wsky.have ? wsky.scale + (r - wsky.scale) * 0.1f : r;  // (the first at once; then ~10 frames)
+            static int nlog;
+            if (!wsky.have || (nlog < 4 && fabsf(r - wsky.scale) > 0.5f * wsky.scale))
+                nlog++, LOG("[water] reflection cube matched to the drawn sky: x%.4f (%d sky samples)\n", r, (int)v[2]);
+            wsky.have = true;
+        }
+        wsky.seq[s] = 0;
+    }
+    static TexBackend img;
+    if (!img.image) {
+        VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = VK_FORMAT_R32G32B32A32_SFLOAT,
+                                .extent = {1, 1, 1}, .mipLevels = 1, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT,
+                                .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT};
+        VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+        if (vmaCreateImage(g_vk.vma, &ci, &ai, &img.image, &img.mem, NULL) != VK_SUCCESS) { img.image = VK_NULL_HANDLE; return; }
+        img.format = VK_FORMAT_R32G32B32A32_SFLOAT; img.width = img.height = 1; img.depth = img.layers = img.levels = 1;
+        img.samples = 1; img.aspect = VK_IMAGE_ASPECT_COLOR_BIT; img.base_type = VK_IMAGE_VIEW_TYPE_2D;
+        vk_image_init_layout(vk_cmd(), img.image, img.aspect);
+    }
+    float p[32];
+    memcpy(p, pc, sizeof p);
+    post_pc_big = p;
+    VkImageView in[4] = {dpre, dnow, cpre, probe};
+    post_mips_last = true;  // (the cube's smaller levels: its sky without the stars' and lamps' single texels)
+    post_pass_ex(vk_cmd(), "water_sky.frag", in, 4, &img, NULL, true, NULL, 0);
+    post_pc_big = NULL, post_mips_last = false;
+    int s = wsky.next;
+    wsky.next = (s + 1) & 3;
+    VkCommandBuffer cb = vk_cmd();
+    vk_full_barrier(cb);
+    VkBufferImageCopy c = {.bufferOffset = (VkDeviceSize)s * 16, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .imageExtent = {1, 1, 1}};
+    rec_CmdCopyImageToBuffer(cb, img.image, VK_IMAGE_LAYOUT_GENERAL, wsky.buf, 1, &c);
+    vk_full_barrier(cb);
+    wsky.seq[s] = vk_pending_seq();
+}
+
 static bool planar_inputs(VkImageView *lit, VkImageView *depth, float *y);  // (planar water reflections: below)
 static bool sspr_run(VkImageView dpre, VkImageView cpre, const float *wpc, VkImageView *out, float *y);  // (and SSPR)
 static void water_apply_pending(void) {
@@ -10169,12 +10263,13 @@ static void water_apply_pending(void) {
     static const VkComponentMapping id = {0};
     VkImageView dnow = vk_image_view(db, VK_IMAGE_VIEW_TYPE_2D, db->format, 0, 1, 0, 1, id, VK_IMAGE_ASPECT_DEPTH_BIT);
     VkImageView dpre = vk_image_view(&water.dsnap, VK_IMAGE_VIEW_TYPE_2D, water.dsnap.format, 0, 1, 0, 1, id, VK_IMAGE_ASPECT_DEPTH_BIT);
-    VkImageView cpre = post_view(&water.csnap), probe = water_probe;
-    water_probe = VK_NULL_HANDLE;  // (this frame's lighting's: its texture may be gone by the next)
+    VkImageView cpre = post_view(&water.csnap), probe = water_cube ? water_cube : water_probe;
+    water_probe = water_cube = VK_NULL_HANDLE, water_cube_w = 0;  // (this frame's: their textures may be gone by the next)
     if (!dnow || !dpre || !cpre || !probe) return;  // (no reflection cube in this frame's lighting: none)
     extern uint64_t renderer_exec_frame(void);
     float pc[32];
     memcpy(pc, gtao.pc, sizeof pc);
+    pc[19] = water_sky_scale();  // (cam.w, which the shaders don't read: the cube's brightness to the drawn sky's)
     int extras = water_extras();
     pc[20] = water_reflect_on() ? gtao_env("LARECOMP_WATER_STRENGTH", 1.0f) : 0;
     pc[21] = (float)extras;  // (bits: 1 depth, 2 caustics, 4 vivid)
@@ -10198,6 +10293,7 @@ static void water_apply_pending(void) {
                         pc[20], extras & 1, extras >> 1 & 1, extras >> 2 & 1);
     extern void planar_level_probe(VkImageView dnow, VkImageView dpre, const float *pc);
     planar_level_probe(dnow, dpre, pc);
+    water_sky_probe(dnow, dpre, cpre, probe, pc);
 }
 
 // ================================================================== planar water reflections

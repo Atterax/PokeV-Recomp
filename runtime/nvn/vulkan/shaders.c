@@ -939,7 +939,9 @@ static const char *builtin_src(const char *name, int *stage) {
                 "      }\n"
                 "    }\n"
                 "  }\n"
-                "  for (int i = 0; i < 48 && !mir; i++) {\n"
+                // (64 steps from 10 cm, x1.14 each: ~400 m. Z-A's 48 x1.13 reached ~35 m, its plazas' size; Scarlet /
+                // Violet's lakes and rivers have their banks farther than that, and the search ended short of them)
+                "  for (int i = 0; i < 64 && !mir; i++) {\n"
                 "    vec3 Q = P + R * t;\n"
                 "    vec2 q = to_uv(vp, Q, dz);\n"
                 "    if (any(lessThan(q, vec2(0.0))) || any(greaterThan(q, vec2(1.0))) || dz <= 0.0) break;\n"
@@ -967,7 +969,7 @@ static const char *builtin_src(const char *name, int *stage) {
                 "        if (run >= 2.0) { n_hidden = n_after; break; }\n"
                 "      }\n"
                 "    } else run = 0.0;\n"
-                "    t *= 1.13;\n"
+                "    t *= 1.14;\n"
                 "  }\n"
                 // (a ray that stayed hidden to its end went under something the camera can't see - a bridge's arch,
                 // an awning: what it mirrors is that, in shade, not the cube, which was captured out in the open and
@@ -981,7 +983,8 @@ static const char *builtin_src(const char *name, int *stage) {
                 "  float edge = found * clamp(min(e.x, e.y) * 12.0, 0.0, 1.0);\n"
                 // (off the picture: the game's reflection cube. Its probe sits elsewhere, and at night it holds the lamps
                 // around it as bright spots that would show up where there is no lamp: capped at 3x its face's mean)
-                "  vec3 env = textureLod(t3, R, 0.0).rgb, avg = textureLod(t3, R, 16.0).rgb;\n"
+                // (pc.cam.w: the cube's brightness matched to the sky drawn - exec.c water_sky_probe; 1 in Z-A)
+                "  vec3 env = textureLod(t3, R, 0.0).rgb * pc.cam.w, avg = textureLod(t3, R, 16.0).rgb * pc.cam.w;\n"
                 "  env *= min(1.0, 3.0 * max(avg.r, max(avg.g, avg.b)) / max(max(env.r, max(env.g, env.b)), 1e-4));\n"
                 "  env = mix(env, textureLod(t2, occ_q, 0.0).rgb * 0.35, hidden);\n"
                 "  vec3 col = mir ? mcol : mix(env, textureLod(t2, hit, 0.0).rgb, edge);\n"
@@ -992,7 +995,7 @@ static const char *builtin_src(const char *name, int *stage) {
                 "  vec3 B = wpos(uv, db);\n"
                 "  float path = db > 0.0 ? length(B - P) : 30.0;\n"  // (through the water to its floor, metres)
                 "  vec3 Tr = vec3(1.0), add = vec3(0.0);\n"
-                "  vec3 sky = textureLod(t3, vec3(0.0, 1.0, 0.0), 16.0).rgb;\n"  // (the light from above: the cube's mean)
+                "  vec3 sky = textureLod(t3, vec3(0.0, 1.0, 0.0), 16.0).rgb * pc.cam.w;\n"  // (the light from above: the cube's mean)
                 "  if ((fl & 1) != 0) {\n"  // (deep water keeps part of the game's own colour: the fade's floor)
                 "    Tr = mix(vec3(0.40, 0.50, 0.60), vec3(1.0), exp(-vec3(0.45, 0.12, 0.07) * pc.prj.x * path));\n"
                 "    add += (1.0 - Tr) * sky * vec3(0.02, 0.06, 0.10);\n"
@@ -1090,6 +1093,37 @@ static const char *builtin_src(const char *name, int *stage) {
                "  W.y = 2.0 * pc.prj.w - W.y;\n"
                "  o = vec4(texelFetch(t1, q, 0).rgb, length(W - pc.cam.xyz));\n"
                "}\n";
+    }
+    // ---- the reflection cube's brightness against the sky the game drew (exec.c water_sky_probe), into a 1 x 1 image:
+    // t0 the depth before the water, t2 the lit image before it, t3 the cube. Over a 48 x 27 grid of the picture, where
+    // nothing was drawn (depth 0: the sky), the summed luminance of the picture (.x) and of the cube in that pixel's
+    // direction (.y, a blurred level: the stars' and lamps' single texels don't count), and how many (.z)
+    if (!strcmp(name, "water_sky.frag")) {
+        *stage = STAGE_FRAGMENT;
+        static char *src;
+        if (!src) {
+            static const char body[] =
+                "layout(set = 0, binding = 2) uniform sampler2D t2;\n"
+                "layout(set = 0, binding = 3) uniform samplerCube t3;\n"
+                "void main() {\n"
+                "  const vec3 lw = vec3(0.2126, 0.7152, 0.0722);\n"
+                "  float sp = 0.0, sc = 0.0, n = 0.0;\n"
+                "  for (int j = 0; j < 27; j++)\n"
+                "    for (int i = 0; i < 48; i++) {\n"
+                "      vec2 uv = (vec2(i, j) + 0.5) / vec2(48.0, 27.0);\n"
+                "      if (depth_at(t0, uv) > 0.0) continue;\n"
+                "      vec3 d = normalize(wpos(uv, 1e-5) - pc.cam.xyz);\n"  // (a point far along the pixel's ray)
+                "      sp += dot(textureLod(t2, uv, 0.0).rgb, lw);\n"
+                "      sc += dot(textureLod(t3, d, 3.0).rgb, lw);\n"
+                "      n += 1.0;\n"
+                "    }\n"
+                "  o = vec4(sp, sc, n, 1.0);\n"
+                "}\n";
+            size_t n = strlen(gtao_common) + strlen(body) + 1;
+            src = malloc(n);
+            snprintf(src, n, "%s%s", gtao_common, body);
+        }
+        return src;
     }
     // ---- the water's height for the planar reflections (exec.c planar_level_probe), into a 1 x 1 image: t0 the depth
     // now, t1 the depth before the water; over a 48 x 27 grid of the picture, where the water drew, the mean world
