@@ -2482,9 +2482,13 @@ static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
 static PrepEnt *sess_progs, *sess_cs, *sess_slots;  // content key -> Prog / CsProg; stage code hash -> its slots + 1<<32
 static size_t sess_progs_cap, sess_cs_cap, sess_slots_cap, sess_progs_n, sess_cs_n, sess_slots_n;
 static bool sess_on(void) {
-    static int on = -1;
-    if (on < 0) on = !ENV("LARECOMP_VK_SESSION_PROGRAMS") || atoi(ENV("LARECOMP_VK_SESSION_PROGRAMS")) != 0;
-    return on;
+    static _Atomic int on = -1;
+    int v = atomic_load_explicit(&on, memory_order_relaxed);
+    if (v < 0) {
+        v = !ENV("LARECOMP_VK_SESSION_PROGRAMS") || atoi(ENV("LARECOMP_VK_SESSION_PROGRAMS")) != 0;
+        atomic_store_explicit(&on, v, memory_order_relaxed);
+    }
+    return v != 0;
 }
 static uint32_t sess_used_slots(const ShaderInfo *si) {  // the texture handle slots a translated shader reads
     uint32_t m = 0;
@@ -2547,7 +2551,7 @@ static Prog *get_program_(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
         uint64_t vh = shader_stage_hash(&np->stages[0]), fh = shader_stage_hash(&np->stages[1]);
         uint64_t ck = prog_content_key(vh, fh, vkey, fkey);
         Prog *pp = vh && fh && prep_progs_n ? PREP_GET(prep_progs, ck) : NULL;
-        if (!pp && vh && fh && sess_on() && sess_progs_n) {  // (built earlier: elsewhere, or with another unread slot)
+        if (!pp && vh && fh && sess_on()) {  // (built earlier: elsewhere, or with another unread slot)
             pp = PREP_GET(sess_progs, ck);
             if (!pp) pp = sess_get_masked(vh, fh, vkey, fkey);
         }
@@ -6180,7 +6184,7 @@ static CsProg *compute_program(NvnProgram *np) {
     }
     uint64_t ch = shader_stage_hash(ss);
     CsProg *cp = ch && prep_cs_n ? PREP_GET(prep_cs, cs_content_key(ch, local)) : NULL;  // prepared before the game
-    if (!cp && ch && sess_on() && sess_cs_n) cp = PREP_GET(sess_cs, cs_content_key(ch, local));  // (built this run)
+    if (!cp && ch && sess_on()) cp = PREP_GET(sess_cs, cs_content_key(ch, local));  // (built this run)
     if (cp) {
         cs_tab_put(at, ss->code_addr, fp, cp);
         shader_fp_check(&cp->p.fp[0], ss, "cs");
