@@ -10,9 +10,11 @@ cd "$(dirname "$0")/../.."
 unset INCLUDE LIB LIBPATH
 UCRT_DIR=""
 for candidate in \
+  "/c/msys64/msys64/ucrt64/bin" \
+  "/c/msys64/ucrt64/bin" \
   "/d/a/_temp/setup-msys2/msys64/ucrt64/bin" \
   "/d/a/_temp/setup-msys2/ucrt64/bin" \
-  "/c/msys64/ucrt64/bin" \
+  "/d/a/_temp/msys64/ucrt64/bin" \
   "/c/hostedtoolcache/windows/msys64/ucrt64/bin"; do
   if [ -x "$candidate/clang.exe" ]; then
     UCRT_DIR="$candidate"
@@ -79,7 +81,7 @@ USERPROFILE="$(cygpath -w ~)" build/prompts-venv/Scripts/python.exe -m PyInstall
 build/helper/zaprompts/zaprompts.exe --xbox-attack-layout-version  # refuse a ZIP with an older/incomplete helper
 # 3. the LGPL FFmpeg, the exe (release: no console, log in lasrecomp.log) and zig with its runtime built ahead of time
 SRC_FF=build/deps-win/src/ffmpeg-9.0.2.tar.xz
-if [ ! -f "$SRC_FF" ]; then
+if [ ! -f build/deps-win/lib/libavcodec.dll.a ] && [ ! -f "$SRC_FF" ]; then
     mkdir -p build/deps-win/src
     for u in "https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz" "https://www.ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz"; do
         if curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 --retry-connrefused --http1.1 -o "$SRC_FF.part" "$u"; then

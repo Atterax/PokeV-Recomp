@@ -34,8 +34,9 @@ B         ?= build
 MACOS_MIN ?=
 DEPS      ?=
 MINFLAG  := $(if $(MACOS_MIN),-mmacosx-version-min=$(MACOS_MIN))
-CC       := clang $(MINFLAG) $(CROSS)
-CXX      := clang++ $(MINFLAG) $(CROSS)
+CC_LAUNCHER ?=
+CC       := $(if $(CC_LAUNCHER),$(CC_LAUNCHER) )clang $(MINFLAG) $(CROSS)
+CXX      := $(if $(CC_LAUNCHER),$(CC_LAUNCHER) )clang++ $(MINFLAG) $(CROSS)
 IMGUI    := third_party/imgui
 # GENOPT: the generated code's optimization (-O0 builds in seconds: some lifted functions take clang -O1 minutes)
 GENOPT   ?= -O1
