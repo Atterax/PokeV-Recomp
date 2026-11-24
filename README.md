@@ -28,7 +28,14 @@
 > [PokeL-ARecomp](https://github.com/fabioschmidt01/PokeL-ARecomp).
 
 > [!NOTE]
-> **Latest updates (v0.0.23 to v0.0.28): big improvements in performance and stability, and many bug fixes.**
+> **Latest updates (v0.0.23 to v0.0.29): big improvements in performance and stability, and many bug fixes.**
+> - **v0.0.29:** F1 > World detail and high-detail frame-rate optimizations ([#17](../../pull/17), [#25](../../pull/25)),
+>   black / see-through frames after pressing "Battle" fixed ([#26](../../pull/26)), title-screen sound via `hwopus` +
+>   `libopus` ([#28](../../pull/28)), DLAA per-object character motion vectors, fade-grid fix and post-resolve UI
+>   ([#29](../../pull/29)), resilient Windows `lasgame.dll` replacement ([#31](../../pull/31)), AMD GPU write-hazard and
+>   automatic GPU slow-frame diagnostics ([#35](../../pull/35), [#36](../../pull/36)), and standalone `PokeV-Recomp`
+>   packaging & cross-platform CI ([#30](../../pull/30), [#32](../../pull/32)–[#40](../../pull/40)). **No game-code
+>   recompilation is needed when upgrading from v0.0.28.**
 > - **v0.0.28, 12 community pull requests:** a crash entering cities fixed, black / stretched triangles around NPCs and in
 >   the sandstorm and fog gone, NPCs keep their eyebrows up close, smooth sky, UI animations at the right speed at
 >   60 fps, working ambient occlusion and indirect light, controller stick dead zone (map magnifier / fast travel),
@@ -168,10 +175,17 @@ Thank you to everyone who reported problems and sent fixes: without them these b
   ([#9](../../pull/9)), black triangles following NPCs ([#10](../../pull/10)), UI animations at 60 fps
   ([#11](../../pull/11)), NVIDIA DLAA ([#12](../../pull/12)), ambient occlusion and indirect light
   ([#13](../../pull/13)), F1 > People shown ([#15](../../pull/15)) and People / Pokémon detail ([#16](../../pull/16)).
+  In v0.0.29: F1 > World detail and high-detail frame-rate work ([#17](../../pull/17), [#25](../../pull/25)), battle
+  black / see-through frames fixed ([#26](../../pull/26)), `hwopus` audio ([#28](../../pull/28)) and DLAA motion / UI
+  fixes ([#29](../../pull/29)).
 - **[didslima](https://github.com/didslima)**: tested the Linux AppImage on Bazzite, reported that it shared Legends:
   Arceus's data folder ([#1](../../issues/1)) and fixed it: PokeV-Recomp's own data folder, only Pokémon Violet's
   files accepted, PokeV-Recomp names in the AppImage, with tests ([#2](../../pull/2)). In v0.0.28: 32:9 ultrawide
-  support - Hor+ camera and the HUD, menus and title art kept at 16:9 ([#14](../../pull/14)).
+  support - Hor+ camera and the HUD, menus and title art kept at 16:9 ([#14](../../pull/14)). In v0.0.29: standalone
+  `PokeV-Recomp` identity ([#30](../../pull/30), [#32](../../pull/32), [#34](../../pull/34)), resilient `lasgame.dll`
+  cache replacement ([#31](../../pull/31)), AMD GPU write & automatic slow-frame diagnostics ([#35](../../pull/35),
+  [#36](../../pull/36)), Metal/runtime fixes ([#39](../../pull/39)), and cross-platform CI + 57-run test suite
+  ([#33](../../pull/33), [#37](../../pull/37), [#38](../../pull/38), [#40](../../pull/40)).
 
 Reports and pull requests are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md).
 

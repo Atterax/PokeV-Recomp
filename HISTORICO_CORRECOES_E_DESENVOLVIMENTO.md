@@ -1017,4 +1017,26 @@ Aceitas de uma vez (todas com descrição, testes e indicação de recompilaçã
 
 ---
 
+## 36. Release v0.0.29 — Detalhe do Mundo, DLAA, Áudio Opus, Batalhas e Infraestrutura
+
+Melhorias integradas entre a `v0.0.28` e a `v0.0.29`:
+- **Atterax:** #17 e #25 F1 > Detalhe do mundo (terreno, prédios, árvores e rochas mantêm modelos detalhados mais longe)
+  e otimizações de taxa de quadros para configurações altas de detalhe (gravação assíncrona em Vulkan, filas de comando
+  e alocadores); #26 correção de quadros pretos / transparentes logo após apertar "Battle" (programas NVN localizados
+  novamente pelo conteúdo e pelos slots lidos pelos shaders); #28 serviço de decodificação Opus por hardware (`hwopus`
+  com `libopus`, restaurando o som da tela de título); #29 melhorias no NVIDIA DLAA (vetores de movimento por objeto
+  para personagens, eliminação de grade em fades e interface desenhada após o resolve).
+- **didslima:** #30, #32, #34 e #39 consolidação da identidade e empacotamento independente do `PokeV-Recomp`
+  (executáveis `PokeV-Recomp.exe` / `PokeV-Recomp`, URLs oficiais `didslima/PokeV-Recomp`, nome do pacote de update no
+  launcher e correções de formatação no backend Metal, preservando `larecomp.ini`, `RT_BUNDLE_ID`, pastas legadas e
+  `lasgame.*`); #31 substituição resiliente do `lasgame.dll` no Windows quando mantido aberto por antivírus / processo
+  anterior e validação de bibliotecas corrompidas; #35 e #36 diagnósticos automáticos em GPUs AMD (`LARECOMP_GPU_WRITES`
+  ativo por padrão em placas AMD, sem impacto em performance) e perfilamento automático de passes da GPU após quadros
+  lentos limitados por GPU; #33, #37, #38 e #40 CI multiplataforma otimizada (Linux, Windows e macOS com `ccache` e
+  57 execuções de suítes automatizadas de compatibilidade, saves, cache de build e Vulkan).
+- **Só runtime (`GAMELIB_ID` inalterado):** quem já está na `v0.0.28` **não** precisa recompilar o código do jogo.
+  Versão **`v0.0.29`**.
+
+---
+
 *Documento mantido em sincronia contínua pelo assistente de IA Antigravity (Google DeepMind).*
