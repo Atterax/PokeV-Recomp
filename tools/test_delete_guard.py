@@ -31,7 +31,7 @@ else:
     elif not flags:
         flags = ['-lSDL3']
 extra = {'macos': ['-framework', 'CoreFoundation'], 'linux': ['-pthread', '-ldl'],
-         'windows': ['-D_FILE_OFFSET_BITS=64', '-D_POSIX_THREAD_SAFE_FUNCTIONS', '-D_CRT_RAND_S',
+         'windows': ['-mconsole', '-D_FILE_OFFSET_BITS=64', '-D_POSIX_THREAD_SAFE_FUNCTIONS', '-D_CRT_RAND_S',
                      '-DWIN32_LEAN_AND_MEAN', '-DNOMINMAX', '-lwinmm', '-lgdi32', '-lole32', '-lshell32', '-lcomdlg32', '-luuid', '-ladvapi32']}[plat]
 with tempfile.TemporaryDirectory() as directory:
     directory = Path(directory)
