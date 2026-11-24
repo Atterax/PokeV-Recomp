@@ -28,6 +28,7 @@ uint64_t rq_render_cpu_ns(void) { return 0; }
 int64_t pace_gpu_ns(void) { return (int64_t)gpu_total_ns; }
 int game_in_play(void) { return 1; }
 bool world_on_screen(void) { return true; }
+int g_game_is_la = 1;
 const char *game_level_name(void) { return "Field"; }
 uint64_t game_camera_zone(void) { return zone; }
 void slow_frame_present(uint64_t now, uint64_t gcpu) { (void)now, (void)gcpu; }

@@ -14,6 +14,8 @@
 
 Settings g_settings = {.res_mode = RES_DYNAMIC};
 bool g_gpu_integrated = true;
+bool g_za_frame_hook = false;
+bool am_handheld(void) { return false; }
 void pace_hitch(const char *why) { (void)why; }  // (output_scale.c's render scale changes: nvn/pace.c)
 void pace_settings_changed(const char *what) { (void)what; }  // (output_scale.c's setting watch: nvn/pace.c)
 
