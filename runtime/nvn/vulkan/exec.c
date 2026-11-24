@@ -10400,6 +10400,11 @@ static void planar_capture(Prog *pr, Pipe *pp, uint32_t streams, const VkDescrip
     if (!((pr->vi->cbuf_mask >> 5) & 1) || !c5.addr || c5.size < 64) return;  // (no camera of its own to mirror)
     extern uint64_t renderer_exec_frame(void);
     uint64_t f = renderer_exec_frame();
+    // (no water worth a mirror lately - planar_level_probe -: back before the lock. Taken for each of the G-buffer's
+    // ~1500 draws on 3 workers at once, with nothing to keep, it cost a town about a frame a second)
+    static int fixed_y = -1;
+    if (fixed_y < 0) fixed_y = getenv("LARECOMP_PLANAR_Y") != NULL;
+    if (!fixed_y && (!pl_lv.have || f - pl_lv.seen > 120)) return;
     pthread_mutex_lock(&pl_mu);  // (shadow workers draw the G-buffer too: one capture at a time)
     planar_capture_(pr, pp, streams, sets, ndyn, dyn, nv_dyn, gmem, dc, rt, c5, f);
     pthread_mutex_unlock(&pl_mu);
