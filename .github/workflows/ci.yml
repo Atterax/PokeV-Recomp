@@ -164,6 +164,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          if [ "${{ matrix.platform }}" = "windows" ]; then
+            unset INCLUDE LIB LIBPATH
+            CLEAN_PATH=$(echo "$PATH" | tr ':' '\n' | grep -v -i "Program Files/LLVM" | grep -v -i "Windows Kits" | tr '\n' ':')
+            export PATH="$CLEAN_PATH"
+            which clang
+            clang --version
+          fi
           tests=(
             tools/test_fence_sequence.py
             tools/test_field_regions.py
