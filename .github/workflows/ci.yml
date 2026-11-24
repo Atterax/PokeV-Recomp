@@ -199,12 +199,14 @@ jobs:
             echo "CCACHE_MAXSIZE=400M"
           } >> "$GITHUB_ENV"
           COMPILER_VER="$(clang --version | head -n 2; clang++ --version | head -n 1)"
-          BUILD_CFG="platform=${{ matrix.platform }};arch=${{ runner.arch }};os=${{ runner.os }}"
           if [ "${{ matrix.platform }}" = "linux" ]; then
-            BUILD_CFG="$BUILD_CFG;GENOPT=-O1 -DGUEST_VOLATILE;SHADERC=-lshaderc_shared"
+            MAKE_FLAGS="$(make -s --eval='pv: ; @echo "$(RTFLAGS)|$(CXXFLAGS)|$(UIFLAGS)|$(GENFLAGS)"' DEPS=deps SHADERC=-lshaderc_shared GENOPT="-O1 -DGUEST_VOLATILE" pv)"
           elif [ "${{ matrix.platform }}" = "windows" ]; then
-            BUILD_CFG="$BUILD_CFG;RELEASE=1"
+            MAKE_FLAGS="$(make -s --eval='pv: ; @echo "$(RTFLAGS)|$(CXXFLAGS)|$(UIFLAGS)|$(GENFLAGS)"' DEPS=deps RELEASE=1 pv)"
+          else
+            MAKE_FLAGS="$(make -s --eval='pv: ; @echo "$(RTFLAGS)|$(CXXFLAGS)|$(UIFLAGS)|$(GENFLAGS)"' pv)"
           fi
+          BUILD_CFG="platform=${{ matrix.platform }};arch=${{ runner.arch }};os=${{ runner.os }};flags=$MAKE_FLAGS"
           KEY_HASH=$(printf '%s\n%s\n' "$COMPILER_VER" "$BUILD_CFG" | (sha256sum 2>/dev/null || shasum -a 256) | cut -c1-16)
           clang --version | head -n 1
           ccache --version | head -n 1

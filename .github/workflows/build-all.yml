@@ -125,7 +125,8 @@ jobs:
             echo "CCACHE_MAXSIZE=400M"
           } >> "$GITHUB_ENV"
           COMPILER_VER="$(clang --version | head -n 2; clang++ --version | head -n 1)"
-          BUILD_CFG="platform=windows-dist;arch=${{ runner.arch }};os=${{ runner.os }};RELEASE=1;GENOPT=-O1 -DGUEST_VOLATILE"
+          MAKE_FLAGS="$(make -s --eval='pv: ; @echo "$(RTFLAGS)|$(CXXFLAGS)|$(UIFLAGS)|$(GENFLAGS)"' DEPS=deps RELEASE=1 GENARCH=-march=x86-64-v3 GENOPT="-O1 -DGUEST_VOLATILE" pv)"
+          BUILD_CFG="platform=windows-dist;arch=${{ runner.arch }};os=${{ runner.os }};flags=$MAKE_FLAGS"
           KEY_HASH=$(printf '%s\n%s\n' "$COMPILER_VER" "$BUILD_CFG" | sha256sum | cut -c1-16)
           echo "key=$KEY_HASH" >> "$GITHUB_OUTPUT"
 
