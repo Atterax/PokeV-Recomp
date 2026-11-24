@@ -921,12 +921,18 @@ static const char *builtin_src(const char *name, int *stage) {
                 // meshes meet, a pixel wide - is water too: skipped, it showed as a line of the game's own water through
                 // the reflections, depth and caustics. A window pane is upright over far more than that, and stays out.
                 // LARECOMP_WATER_DEBUG=3: red no water, green not level)
-                "  if (abs(Ng.y) < 0.98 * length(Ng)) {\n"
+                // (ws: the pass's weight, faded in from 25 degrees off level to 10 - a waterfall's lip moves with the
+                // water, its triangles tilting by a good 10 degrees from frame to frame, and against the old hard
+                // 11-degree cut whole triangles of it went in and out of the pass: they flickered. Still none on a car's
+                // windshield, laid back 25-40 degrees, #333)
+                "  float lv = abs(Ng.y) / max(length(Ng), 1e-12), ws = smoothstep(0.906, 0.985, lv);\n"
+                "  if (ws <= 0.0) {\n"
                 "    vec2 e2x = 2.0 * ex, e2y = 2.0 * ey;\n"
                 "    if (!((level_px(uv - e2x) && level_px(uv + e2x)) || (level_px(uv - e2y) && level_px(uv + e2y)))) {\n"
                 "      if (pc.prj.z > 2.5) { o = vec4(0.0, 1.0, 0.0, 1.0); return; }\n"
                 "      discard;\n"
                 "    }\n"
+                "    ws = 1.0;\n"
                 "  }\n"
                 "  vec3 V = normalize(pc.cam.xyz - P);\n"
                 // (Z-A's water is level: straight up - the depth's own slope left thin lines at its triangles' seams -
@@ -1025,7 +1031,7 @@ static const char *builtin_src(const char *name, int *stage) {
                 "  env = mix(env, textureLod(t2, occ_q, 0.0).rgb * 0.35, hidden);\n"
                 "  vec3 col = mir ? mcol : mix(mix(env, textureLod(t2, hit, 0.0).rgb, edge), mcol, mw);\n"
                 "  if (pc.prj.z != 0.0) { o = vec4(pc.prj.z > 1.5 ? env : col, 1.0); return; }\n"  // (2: the cube alone)
-                "  float a = clamp(F * pc.prm.x, 0.0, 1.0);\n"
+                "  float a = clamp(F * pc.prm.x, 0.0, 1.0) * ws;\n"
                 "#ifdef WATER_DUAL\n"
                 "  int fl = int(pc.prm.y + 0.5);\n"
                 "  vec3 B = wpos(uv, db);\n"
@@ -1044,6 +1050,7 @@ static const char *builtin_src(const char *name, int *stage) {
                 "    Tr *= vec3(0.88, 0.98, 1.0);\n"
                 "    add += sky * vec3(0.0, 0.035, 0.045) + vec3(0.0, 0.007, 0.009);\n"
                 "  }\n"
+                "  Tr = mix(vec3(1.0), Tr, ws), add *= ws;\n"
                 "  o = vec4(col * a + (1.0 - a) * add, 1.0);\n"
                 "  o1 = vec4((1.0 - a) * Tr, 1.0);\n"
                 "#else\n"
@@ -1179,9 +1186,16 @@ static const char *builtin_src(const char *name, int *stage) {
                 "      float dn = depth_at(t0, uv), db = depth_at(t1, uv);\n"
                 "      if (dn > db + 1e-7) { float y = wpos(uv, dn).y; int k = int(mod(floor(y), 32.0)); sum[k] += y; cnt[k] += 1.0; }\n"
                 "    }\n"
+                // (each level with its neighbours: water right at a whole metre - a river at 76.0 - splits its samples
+                // between two bins, and with the camera's jitter it lost to a smaller water once every 8 frames)
                 "  int b = 0;\n"
-                "  for (int k = 1; k < 32; k++) if (cnt[k] > cnt[b]) b = k;\n"
-                "  o = vec4(cnt[b] > 0.0 ? sum[b] / cnt[b] : 0.0, cnt[b], 0.0, 1.0);\n"
+                "  float bc = -1.0;\n"
+                "  for (int k = 0; k < 32; k++) {\n"
+                "    float c = cnt[(k + 31) % 32] + cnt[k] + cnt[(k + 1) % 32];\n"
+                "    if (c > bc) { bc = c; b = k; }\n"
+                "  }\n"
+                "  float s3 = sum[(b + 31) % 32] + sum[b] + sum[(b + 1) % 32];\n"
+                "  o = vec4(bc > 0.0 ? s3 / bc : 0.0, bc, 0.0, 1.0);\n"
                 "}\n";
             size_t n = strlen(gtao_common) + strlen(body) + 1;
             src = malloc(n);

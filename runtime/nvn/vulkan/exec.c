@@ -10131,9 +10131,13 @@ static void water_surface_cube(Prog *pr) {
 }
 
 // A water surface: blended onto the lit image, writing depth, reading a depth texture
+// (and in the picture's own scene pass - fsr2_scene_pass: its depth, not square. Scarlet / Violet draws its water again
+// every 8th frame for a square view of its own - a reflection probe's -: the water pass ran there too, and its level
+// and sky readings - another camera's - threw the mirror's plane to another water for that frame: the far water and
+// a waterfall's crest flickered every 8 frames)
 static bool water_is_surface(Prog *pr) {
     if (!water_on() || !gtao.target || st.rt.color[0] != gtao.target || !st.color_state[0] || !st.ds[0] || !st.ds[1] ||
-        !st.rt.depth || !pr || !pr->fi)
+        !st.rt.depth || !pr || !pr->fi || !fsr2_scene_pass())
         return false;
     for (int i = 0; i < pr->fi->ntex; i++) {
         NvnTexEntry *e = gtao_tex_entry(pr->fi, i);
@@ -10141,7 +10145,6 @@ static bool water_is_surface(Prog *pr) {
     }
     return false;
 }
-
 // d: an image like s (its format and size: made again when they change); copies s's aspect (colour or depth) into it
 static bool water_copy(TexBackend *d, TexBackend *s, VkImageAspectFlags aspect) {
     if (d->image && (d->width != s->width || d->height != s->height || d->format != s->format)) {
@@ -10322,7 +10325,13 @@ typedef struct {
     VkDescriptorSet gset;
     uint32_t gindex, gd[GMEM_DIRECT_MAX * 4];
     PlDrawCall dc;
+    uint64_t ord;  // (the draw's place in the game's order: draw_ord)
 } PlDraw;
+static uint64_t draw_ord(void);  // (below, with the shadow workers)
+static int pl_ord_cmp(const void *a, const void *b) {
+    uint64_t x = ((const PlDraw *)a)->ord, y = ((const PlDraw *)b)->ord;
+    return x < y ? -1 : x > y;
+}
 static struct {
     PlDraw *d;
     int n, cap, dropped;
@@ -10450,6 +10459,7 @@ static void planar_capture_(Prog *pr, Pipe *pp, uint32_t streams, const VkDescri
     d->gmem = gmem;
     if (gmem) d->gset = gm_last.set, d->gindex = gm_last.index, d->gdirect = gm_last.direct, memcpy(d->gd, gm_last.gd, sizeof d->gd);
     d->dc = *dc;
+    d->ord = draw_ord();
 }
 
 // i: 0-7 a colour target, 8 the depth; made again when the format or size changes
@@ -10506,9 +10516,19 @@ void planar_level_probe(VkImageView dnow, VkImageView dpre, const float *pc) {
         if (dlog) LOG("[planar] level %.4f (%g samples) frame %llu\n", v[0], v[1], (unsigned long long)renderer_exec_frame());
         // (enough water samples. Scarlet / Violet's sea moves with its waves, and the grid's samples with the camera's
         // jitter: the readings go 27.06 - 27.20 from frame to frame, and the mirror, its plane following them, made the
-        // far water flicker with Mirrored picture / scene. Followed slowly; a jump of over a metre is other water: at once)
+        // far water flicker with Mirrored picture / scene. Followed slowly; a jump of over a metre is other water, taken
+        // once it has held for 12 readings running - a single reading of it, from a frame whose samples fell that way,
+        // threw the mirror's plane to it for that frame)
         if (v[1] >= 4) {
-            pl.y = !pl_lv.have || fabsf(v[0] - pl.y) > 1.0f ? v[0] : pl.y + (v[0] - pl.y) * 0.05f;
+            static float cand;
+            static int cand_n;
+            if (!pl_lv.have) pl.y = v[0];
+            else if (fabsf(v[0] - pl.y) <= 1.0f) pl.y += (v[0] - pl.y) * 0.05f, cand_n = 0;
+            else {
+                if (cand_n && fabsf(v[0] - cand) <= 1.0f) cand += (v[0] - cand) * 0.2f, cand_n++;
+                else cand = v[0], cand_n = 1;
+                if (cand_n >= 12) pl.y = cand, cand_n = 0;
+            }
             pl_lv.have = true, pl_lv.seen = renderer_exec_frame();
         }
         pl_lv.seq[s] = 0;
@@ -10659,6 +10679,9 @@ static void planar_replay_pending(void) {
     vk_full_barrier(cb);
     rec_CmdBeginRendering(cb, &ri);
     PlEmit em = {0};
+    // (in the game's order: the shadow workers capture their parts at once, in any order, and the waterfall's
+    // overlapping sheets, drawn again in another order each frame, flickered triangle by triangle in the mirror)
+    qsort(pl.d, (size_t)n, sizeof pl.d[0], pl_ord_cmp);
     for (int k = 0; k < n; k++) planar_emit(cb, &pl.d[k], s, w, h, true, &em);
     rec_CmdEndRendering(cb);
     ss_forget();
@@ -11279,6 +11302,15 @@ static struct { VkCommandPool pool; VkCommandBuffer *cbs; int n, cap, next; } sw
 static uint64_t sw_stat_runs, sw_stat_draws, sw_stat_aborts, sw_stat_rewound;  // (logged every 600 frames: sw_run)
 static uint64_t sw_stat_walk_ns, sw_stat_wait_ns, sw_stat_run_ns;
 static __thread int sw_budget;  // (a worker) draws left in its part
+// A draw's place in the game's order, for what draws captured draws again (planar_replay_pending): on the render
+// thread a count; in a run's part, the run's place, the part and the draw's index in it (render thread only writes
+// sw_ord_main / sw_ord_base; a part reads the base it was started with)
+static uint64_t sw_ord_main, sw_ord_base;
+static __thread int sw_part_k = -1, sw_part_n0;
+static uint64_t draw_ord(void) {
+    if (sw_part_k >= 0) return sw_ord_base + ((uint64_t)sw_part_k << 16) + (uint64_t)(sw_part_n0 - sw_budget);
+    return ++sw_ord_main << 24;
+}
 static __thread const CmdRec *sw_abort_r;  // (a worker) the draw it gave back (exec_list)
 static __thread const CmdRec *sw_stop;  // (a worker, and the walk) the run ends at this record (NULL: its lists' ends)
 static const CmdRec *sw_tail_stop;  // (sw_tail -> exec_list) where the render thread goes on after the run
@@ -11378,6 +11410,7 @@ static void sw_chunk(int w, SwJob *j) {
     extern void rec_worker_enter(int w, VkCommandBuffer cb), rec_worker_leave(void);
     rec_worker_enter(w, j->cb);
     sw_budget = j->budget;
+    sw_part_k = w, sw_part_n0 = j->budget;
     sw_stop = j->stop;
     j->abort_r = NULL;
     for (uint64_t i = j->li; i < j->ln && sw_budget > 0 && !j->abort_r; i++) {
@@ -11385,6 +11418,7 @@ static void sw_chunk(int w, SwJob *j) {
         exec_list(i == j->li ? j->p : j->h[i], j->depth);
         if (sw_abort_r) j->abort_r = sw_abort_r, j->abort_li = i;
     }
+    sw_part_k = -1;
     sw_stop = NULL;
     rec_worker_leave();
     VK_CHECK(vkEndCommandBuffer(j->cb));
@@ -11963,6 +11997,7 @@ static void sw_run(const uint64_t *h, uint64_t n, uint64_t first, int depth, int
         j->cb = sw_secondary(k);
     }
     // the workers (part 0 here)
+    sw_ord_base = ++sw_ord_main << 24;
     pthread_mutex_lock(&sw_mu);
     sw_njobs = parts;
     sw_left = sw_n;
