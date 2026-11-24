@@ -179,11 +179,15 @@ jobs:
             tools/test_flagfuse.py
             tools/test_game_identity.py
             tools/test_regpromote.py
-            tools/test_vulkan_overlay.py
-            tools/test_vulkan_sync_errors.py
             tools/test_widescreen_proj.py
             tools/test_xbox_attack_prepare.py
           )
+          if [ "${{ matrix.platform }}" != "macos" ]; then
+            tests+=(
+              tools/test_vulkan_overlay.py
+              tools/test_vulkan_sync_errors.py
+            )
+          fi
           if [ "${{ matrix.platform }}" = "windows" ]; then
             tests+=(
               tools/test_windows_logs.py
