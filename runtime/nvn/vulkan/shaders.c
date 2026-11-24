@@ -921,10 +921,15 @@ static const char *builtin_src(const char *name, int *stage) {
                 // the mirror image (prm.y bit 8; prj.w its plane - water at another level goes on below): a point of the
                 // plane shows at its own uv there. The ripples: the ray's point at the distance the mirror shows, mirrored
                 // and projected with the normal camera. Nothing drawn there: the screen's search, as without the mirror
+                // (mw: how much of the mirror - its plane's tolerance grows with the distance, and fades out over as much
+                // again: Scarlet / Violet's sea rises and falls with its waves, and a hard 15 cm cut made the far water
+                // flicker between the mirror and the search from frame to frame; the search fills in the rest)
                 "  bool mir = false;\n"
+                "  float mw = 0.0;\n"
                 "  vec3 mcol = vec3(0.0);\n"
                 "  int fl0 = int(pc.prm.y + 0.5);\n"
-                "  if ((fl0 & 24) != 0 && abs(P.y - pc.prj.w) < 0.15) {\n"
+                "  float mtol = 0.25 + 0.002 * length(P - pc.cam.xyz), mdy = abs(P.y - pc.prj.w);\n"
+                "  if ((fl0 & 24) != 0 && mdy < 2.0 * mtol) {\n"
                 "    float dist = -1.0;\n"  // (8: t5 the mirror's depth; 16, SSPR: t4's alpha the distance from the camera)
                 "    if ((fl0 & 8) != 0) { float dm = fetch_at(t5, uv).r; if (dm > 0.0) dist = length(wpos(uv, dm) - P); }\n"
                 "    else { float L = fetch_at(t4, uv).a; if (L > 0.0) dist = max(L - length(P - pc.cam.xyz), 0.0); }\n"
@@ -934,7 +939,8 @@ static const char *builtin_src(const char *name, int *stage) {
                 "      vec2 q = clamp(to_uv(vp, T, dz), vec2(0.0), vec2(1.0));\n"
                 // (SSPR's holes: all four texels filled, or the search - a filtered read would darken towards them)
                 "      if ((fl0 & 8) != 0 ? fetch_at(t5, q).r > 0.0 : all(greaterThan(textureGather(t4, q, 3), vec4(0.0)))) {\n"
-                "        mir = true;\n"
+                "        mw = 1.0 - smoothstep(mtol, 2.0 * mtol, mdy);\n"
+                "        mir = mw >= 0.999;\n"
                 "        mcol = textureLod(t4, q, 0.0).rgb;\n"
                 "      }\n"
                 "    }\n"
@@ -987,7 +993,7 @@ static const char *builtin_src(const char *name, int *stage) {
                 "  vec3 env = textureLod(t3, R, 0.0).rgb * pc.cam.w, avg = textureLod(t3, R, 16.0).rgb * pc.cam.w;\n"
                 "  env *= min(1.0, 3.0 * max(avg.r, max(avg.g, avg.b)) / max(max(env.r, max(env.g, env.b)), 1e-4));\n"
                 "  env = mix(env, textureLod(t2, occ_q, 0.0).rgb * 0.35, hidden);\n"
-                "  vec3 col = mir ? mcol : mix(env, textureLod(t2, hit, 0.0).rgb, edge);\n"
+                "  vec3 col = mir ? mcol : mix(mix(env, textureLod(t2, hit, 0.0).rgb, edge), mcol, mw);\n"
                 "  if (pc.prj.z != 0.0) { o = vec4(pc.prj.z > 1.5 ? env : col, 1.0); return; }\n"  // (2: the cube alone)
                 "  float a = clamp(F * pc.prm.x, 0.0, 1.0);\n"
                 "#ifdef WATER_DUAL\n"

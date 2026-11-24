@@ -10501,7 +10501,16 @@ void planar_level_probe(VkImageView dnow, VkImageView dpre, const float *pc) {
         if (!pl_lv.seq[s] || pl_lv.seq[s] > done) continue;
         vmaInvalidateAllocation(g_vk.vma, pl_lv.mem, (VkDeviceSize)s * 16, 16);
         const float *v = pl_lv.ptr + s * 4;
-        if (v[1] >= 4) pl.y = v[0], pl_lv.have = true, pl_lv.seen = renderer_exec_frame();  // (enough water samples)
+        static int dlog = -1;
+        if (dlog < 0) dlog = getenv("LARECOMP_PLANAR_LOG") != NULL;  // (each reading: the level, its samples)
+        if (dlog) LOG("[planar] level %.4f (%g samples) frame %llu\n", v[0], v[1], (unsigned long long)renderer_exec_frame());
+        // (enough water samples. Scarlet / Violet's sea moves with its waves, and the grid's samples with the camera's
+        // jitter: the readings go 27.06 - 27.20 from frame to frame, and the mirror, its plane following them, made the
+        // far water flicker with Mirrored picture / scene. Followed slowly; a jump of over a metre is other water: at once)
+        if (v[1] >= 4) {
+            pl.y = !pl_lv.have || fabsf(v[0] - pl.y) > 1.0f ? v[0] : pl.y + (v[0] - pl.y) * 0.05f;
+            pl_lv.have = true, pl_lv.seen = renderer_exec_frame();
+        }
         pl_lv.seq[s] = 0;
     }
     static TexBackend img;
