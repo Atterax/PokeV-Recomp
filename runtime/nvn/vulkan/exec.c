@@ -10328,8 +10328,9 @@ typedef struct {
     uint64_t ord;  // (the draw's place in the game's order: draw_ord)
 } PlDraw;
 static uint64_t draw_ord(void);  // (below, with the shadow workers)
+typedef struct { uint64_t ord; int i; } PlOrd;  // (sorted instead of the draws: each holds a state copy of KBs)
 static int pl_ord_cmp(const void *a, const void *b) {
-    uint64_t x = ((const PlDraw *)a)->ord, y = ((const PlDraw *)b)->ord;
+    uint64_t x = ((const PlOrd *)a)->ord, y = ((const PlOrd *)b)->ord;
     return x < y ? -1 : x > y;
 }
 static struct {
@@ -10529,7 +10530,11 @@ void planar_level_probe(VkImageView dnow, VkImageView dpre, const float *pc) {
                 else cand = v[0], cand_n = 1;
                 if (cand_n >= 12) pl.y = cand, cand_n = 0;
             }
-            pl_lv.have = true, pl_lv.seen = renderer_exec_frame();
+            // (the mirrored scene, drawn again, only for water worth it: 16 of the grid's 1296 samples, ~1% of the
+            // picture. A coastal town's fountain or puddles - 4 or 5 - had every frame's G-buffer, ~1500 draws, drawn
+            // again for a few pixels: 54 fps there against 59 with the screen search, which they fall back to)
+            pl_lv.have = true;
+            if (v[1] >= 16) pl_lv.seen = renderer_exec_frame();
         }
         pl_lv.seq[s] = 0;
     }
@@ -10680,9 +10685,20 @@ static void planar_replay_pending(void) {
     rec_CmdBeginRendering(cb, &ri);
     PlEmit em = {0};
     // (in the game's order: the shadow workers capture their parts at once, in any order, and the waterfall's
-    // overlapping sheets, drawn again in another order each frame, flickered triangle by triangle in the mirror)
-    qsort(pl.d, (size_t)n, sizeof pl.d[0], pl_ord_cmp);
-    for (int k = 0; k < n; k++) planar_emit(cb, &pl.d[k], s, w, h, true, &em);
+    // overlapping sheets, drawn again in another order each frame, flickered triangle by triangle in the mirror. An
+    // index is sorted, not the draws: moving ~1500 of them, each with its state copy, cost a town 18 fps)
+    static PlOrd *ord;
+    static int ord_cap;
+    if (n > ord_cap) {
+        PlOrd *o = realloc(ord, (size_t)n * sizeof *o);
+        if (o) ord = o, ord_cap = n;
+    }
+    bool sorted = n <= ord_cap;
+    if (sorted) {
+        for (int k = 0; k < n; k++) ord[k].ord = pl.d[k].ord, ord[k].i = k;
+        qsort(ord, (size_t)n, sizeof *ord, pl_ord_cmp);
+    }
+    for (int k = 0; k < n; k++) planar_emit(cb, &pl.d[sorted ? ord[k].i : k], s, w, h, true, &em);
     rec_CmdEndRendering(cb);
     ss_forget();
     vk_full_barrier(cb);
