@@ -10,11 +10,11 @@ cd "$(dirname "$0")/../.."
 unset INCLUDE LIB LIBPATH
 UCRT_DIR=""
 for candidate in \
-  "/c/msys64/msys64/ucrt64/bin" \
-  "/c/msys64/ucrt64/bin" \
+  "/d/a/_temp/msys64/ucrt64/bin" \
   "/d/a/_temp/setup-msys2/msys64/ucrt64/bin" \
   "/d/a/_temp/setup-msys2/ucrt64/bin" \
-  "/d/a/_temp/msys64/ucrt64/bin" \
+  "/c/msys64/msys64/ucrt64/bin" \
+  "/c/msys64/ucrt64/bin" \
   "/c/hostedtoolcache/windows/msys64/ucrt64/bin"; do
   if [ -x "$candidate/clang.exe" ]; then
     UCRT_DIR="$candidate"
