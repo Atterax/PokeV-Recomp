@@ -1,5 +1,5 @@
 #!/bin/bash
-# ZA Recomp release for Windows: build/dist-za/ZA Recomp/ (ZIP=1: + ZA-Recomp-windows.zip). No game code or game files:
+# PokeV-Recomp release for Windows: build/dist-za/PokeV-Recomp/ (ZIP=1: + PokeV-Recomp-windows.zip). No game code or game files:
 # the start screen reads the player's own .xci / .nsp with their prod.keys (zaimport/) and recompiles the game on their
 # machine (lasgen/ = tools/gen.py frozen by PyInstaller, zig/ = the compiler, gamelib-src/ = the headers it includes).
 # Run from Git Bash with MSYS2 (UCRT64) installed, Python 3.12 (py launcher) and the .NET 8 SDK. Downloads once: zig
@@ -34,7 +34,7 @@ command -v /c/Windows/System32/curl.exe >/dev/null 2>&1 && CURL_BIN="/c/Windows/
 TAR_BIN="tar"
 command -v /c/Windows/System32/tar.exe >/dev/null 2>&1 && TAR_BIN="/c/Windows/System32/tar.exe"
 GENOPT="-O1 -DGUEST_VOLATILE" GENARCH=-march=x86-64-v3  # (the game code's flags: part of the library id)
-B=build/za-dist D="build/dist-za/ZA Recomp"
+B=build/za-dist D="build/dist-za/PokeV-Recomp"
 
 # 1. the compiler (Windows' curl: MSYS2's one rejects TLS-inspecting proxies' certificates)
 ZIP_ZIG=build/zig-dl/zig-x86_64-windows-0.17.0.zip
@@ -128,6 +128,6 @@ PATH="$PWD/build/deps-win/bin:$PATH" ldd $B/PokeV-Recomp.exe | awk 'tolower($3) 
 ! ls "$D" | grep -iE 'x264|x265|xvid|postproc'  # (no GPL codec libraries in the release)
 du -sh "$D"
 if [ "${ZIP:-0}" = 1 ]; then
-    (cd build/dist-za && $TAR_BIN -a -cf ZA-Recomp-windows.zip "ZA Recomp")
-    ls -la build/dist-za/ZA-Recomp-windows.zip
+    (cd build/dist-za && $TAR_BIN -a -cf PokeV-Recomp-windows.zip "PokeV-Recomp")
+    ls -la build/dist-za/PokeV-Recomp-windows.zip
 fi

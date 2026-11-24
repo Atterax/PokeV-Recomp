@@ -1,10 +1,10 @@
 #!/bin/bash
-# ZA Recomp on Linux x86-64, built natively (no container): the start screen, and with GAME=1 the game code from the
+# PokeV-Recomp on Linux x86-64, built natively (no container): the start screen, and with GAME=1 the game code from the
 # player's own extracted/ (exefs/ + romfs.bin, as the start screen sets them up). Checked on Linux Mint 22.3 (Ubuntu
 # 24.04 base). The result needs this machine's glibc or newer; tools/linux/appimage.sh (podman, Ubuntu 22.04) is the
 # portable way. No game files or game code are read unless GAME=1, and nothing outside this checkout is written.
 #
-#   tools/za/build-linux.sh            # -> build/linux/x86_64/za/lasrecomp (run it from the repo root)
+#   tools/za/build-linux.sh            # -> build/linux/x86_64/za/PokeV-Recomp (run it from the repo root)
 #   GAME=1 tools/za/build-linux.sh     # + generated/ from extracted/exefs, then lasgame.so (~20-60 min, ~6 GB RAM)
 #
 # SDL3 3.4, an LGPL FFmpeg, shaderc and the Vulkan / VMA headers come from pinned sources (tools/linux/build_deps.sh,
@@ -53,9 +53,9 @@ if [ ! -e "$P/lib/libvulkan.so" ] && ! pkg-config --exists vulkan; then
 fi
 
 # ---- the start screen (no game code inside: that is built from the player's files)
-make -j"$JOBS" B="$B" DEPS="$P" SHADERC=-lshaderc_shared GENOPT="$GENOPT" "$B/lasrecomp"
-if nm "$B/lasrecomp" | grep -q ' f_70'; then echo "build-linux: game code linked into the app"; exit 1; fi
-echo "build-linux: $B/lasrecomp"
+make -j"$JOBS" B="$B" DEPS="$P" SHADERC=-lshaderc_shared GENOPT="$GENOPT" "$B/PokeV-Recomp"
+if nm "$B/PokeV-Recomp" | grep -q ' f_70'; then echo "build-linux: game code linked into the app"; exit 1; fi
+echo "build-linux: $B/PokeV-Recomp"
 
 [ "${GAME:-0}" = 1 ] || exit 0
 

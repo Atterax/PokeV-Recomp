@@ -1,8 +1,8 @@
 [Desktop Entry]
 Type=Application
-Name=LAS Recomp
-Comment=The Legend of Zelda: Link's Awakening, recompiled (bring your own game files)
-Exec=lasrecomp
-Icon=lasrecomp
+Name=PokeV Recomp
+Comment=Pokémon Violet & Scarlet, recompiled for PC (bring your own game files)
+Exec=PokeV-Recomp
+Icon=pokev-recomp
 Categories=Game;
 Terminal=false
