@@ -30,7 +30,7 @@ jobs:
             os: windows-2022
             platform: windows
           - name: macOS (Apple Silicon)
-            os: macos-14
+            os: macos-latest
             platform: macos
 
     steps:
@@ -142,6 +142,8 @@ jobs:
           fi
           CLEAN_PATH=$(echo "$PATH" | tr ':' '\n' | grep -v -i "Program Files/LLVM" | grep -v -i "Windows Kits" | tr '\n' ':')
           export PATH="$UCRT_DIR:$(dirname "$UCRT_DIR")/usr/bin:$CLEAN_PATH"
+          echo "$UCRT_DIR" >> "$GITHUB_PATH"
+          echo "$(dirname "$UCRT_DIR")/usr/bin" >> "$GITHUB_PATH"
           bash tools/build_deps_windows.sh
           make -j"$(nproc)" B=build/win DEPS="$PWD/build/deps-win" RELEASE=1 build/win/PokeV-Recomp.exe
           ! nm build/win/PokeV-Recomp.exe | grep -q ' f_70'
@@ -162,20 +164,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ "${{ matrix.platform }}" = "windows" ]; then
-            UCRT_DIR=""
-            for candidate in \
-              "/d/a/_temp/setup-msys2/msys64/ucrt64/bin" \
-              "/c/msys64/ucrt64/bin" \
-              "/c/hostedtoolcache/windows/msys64/ucrt64/bin"; do
-              if [ -x "$candidate/clang.exe" ]; then
-                UCRT_DIR="$candidate"
-                break
-              fi
-            done
-            CLEAN_PATH=$(echo "$PATH" | tr ':' '\n' | grep -v -i "Program Files/LLVM" | grep -v -i "Windows Kits" | tr '\n' ':')
-            export PATH="$UCRT_DIR:$(dirname "$UCRT_DIR")/usr/bin:$CLEAN_PATH"
-          fi
           tests=(
             tools/test_fence_sequence.py
             tools/test_field_regions.py
