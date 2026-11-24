@@ -1,4 +1,4 @@
-# LAS Recomp on Linux (x86-64, aarch64)
+# PokeV-Recomp on Linux (x86-64, aarch64)
 
 Status: builds and runs the game on Vulkan (with your own game files) on x86-64, checked before
 each release by `make smoketest`. aarch64 is **experimental**: cross-compiled, its start screen checked under emulation,
@@ -40,7 +40,7 @@ If the AppImage won't start with a FUSE error, install your distribution's `fuse
 
 ## Building from source
 Ubuntu / Debian packages (other distributions: the same libraries under their names). SDL3 must be 3.4 or newer
-(LAS Recomp loads and saves PNGs through it); where the distribution ships an older one (Debian 13 has 3.2), build SDL3
+(PokeV-Recomp loads and saves PNGs through it); where the distribution ships an older one (Debian 13 has 3.2), build SDL3
 3.4 from source first - `tools/linux/build_deps.sh` builds the pinned version the AppImage uses (into
 `build/linux/<arch>/deps`).
 
@@ -55,10 +55,10 @@ Then from the repo root:
     python3 -m venv tools/venv && tools/venv/bin/pip install lz4 capstone unicorn
     make -j         # the start screen only (no game code yet): set up the game files there, or put extracted/ here
     make gen        # once: recompile the game from your own game files
-    make -j         # -> build/lasrecomp and the game code library build/lasgame.so
+    make -j         # -> build/PokeV-Recomp and the game code library build/lasgame.so
 
-Run `./build/lasrecomp` from the repo root: with `extracted/` in the starting folder it uses that folder for
-everything (dev mode) instead of `~/.local/share/lasrecomp`.
+Run `./build/PokeV-Recomp` from the repo root: with `extracted/` in the starting folder it uses that folder for
+everything (dev mode) instead of `~/.local/share/pokev-recomp`.
 
 `ARCH` picks the target, separately from the OS: the generated code differs per arch (aarch64 runs the guest's
 FP/SIMD as inline asm, like Apple Silicon; x86-64 lowers it to C with `-march=x86-64-v3`, like Windows). `make gen`
@@ -75,7 +75,7 @@ The randomizer from a source checkout uses LAS-Randomizer's own venv (Python 3.1
 Needs podman, and for the other arch's AppImage QEMU user emulation with binfmt (`sudo apt install podman qemu-user
 qemu-user-binfmt`).
 
-    make appimage                # this machine's arch -> build/dist/LAS Recomp-<version>-linux-<arch>.AppImage
+    make appimage                # this machine's arch -> build/dist/PokeV-Recomp-<version>-linux-<arch>.AppImage
     make appimage ARCH=aarch64   # on x86-64: cross-compiled
     make appimages               # both
 
@@ -98,7 +98,7 @@ RELEASE or NOT READY; `build/smoke/sheet.png` shows every screenshot. It needs `
 save outside git (`~/.local/share/lasrecomp-smoketest/save`, or `LARECOMP_SMOKE_SAVE`): copy `save/` from any build
 after starting a new game once.
 
-The AppImage holds `lasrecomp`, `rando-gen/`, the start screen font and the bundled libraries (SDL3,
+The AppImage holds `PokeV-Recomp`, `rando-gen/`, the start screen font and the bundled libraries (SDL3,
 FFmpeg, shaderc). Not bundled: glibc, libstdc++, the Vulkan loader and the GPU drivers (always the system's). No game
 files or fonts.
 
@@ -127,10 +127,10 @@ The aarch64 AppImage is experimental: built on x86-64, only its start screen has
    an earlier run, that run's `lasrecomp-backup-*.log`, by date modified).
 5. **A crash backtrace with gdb** when the log's isn't enough:
 
-       ./LAS.Recomp-<version>-linux-aarch64.AppImage --appimage-extract    # -> squashfs-root/
-       cd ~/.local/share/lasrecomp
+       ./PokeV-Recomp-<version>-linux-aarch64.AppImage --appimage-extract    # -> squashfs-root/
+       cd ~/.local/share/pokev-recomp
        gdb -batch -ex 'handle SIGSEGV nostop noprint pass' -ex run -ex 'thread apply all bt 20' \
-           --args ~/squashfs-root/usr/bin/lasrecomp > gdb.txt 2>&1
+           --args ~/squashfs-root/usr/bin/PokeV-Recomp > gdb.txt 2>&1
 
    (Adjust the `squashfs-root` path to where you extracted it. The game itself uses SIGSEGV for memory watches, hence
    the `handle` line; a real crash still ends in the backtrace. Attach `gdb.txt`.)
@@ -149,7 +149,7 @@ shaders (a few seconds of skipped draws); later runs reuse the caches.
 Build: SteamOS' root file system is read-only and has no compiler, so build in a container (distrobox, Ubuntu 24.04 or
 any recent distribution) with the packages above plus SDL3 built from source into a prefix (`DEPS=<prefix>`), then
 `make gen` and `make -j8 DEPS=<prefix> B=build/o1 GENOPT="-O1 -DGUEST_VOLATILE"`. clang 18 can sit for an hour on one giant
-generated function at -O1: build such objects at -O0. Run `build/o1/lasrecomp extracted --play` inside the container (it
+generated function at -O1: build such objects at -O0. Run `build/o1/PokeV-Recomp extracted --play` inside the container (it
 shares the host's display and GPU); add the launcher script to Steam as a non-Steam game to play in Game Mode.
 Do not touch a header to force a rebuild: every generated object depends on them (1411 objects, 34 minutes on the Deck).
 
@@ -199,7 +199,7 @@ published self-contained, so players need no .NET); `patchelf` likewise.
 
 ### Building
 
-    tools/za/build-linux.sh          # the start screen: build/linux/x86_64/za/lasrecomp (run it from the repo root)
+    tools/za/build-linux.sh          # the start screen: build/linux/x86_64/za/PokeV-Recomp (run it from the repo root)
     GAME=1 JOBS=3 tools/za/build-linux.sh   # + the game code (generated/ and lasgame.so) from your own extracted/
     tools/za/dist-linux.sh           # build/dist/ZA Recomp-<version>-linux-x86_64.AppImage (ZAIMPORT=0: no importer)
 
@@ -215,7 +215,7 @@ importer can write `extracted/` (dev mode: `extracted/` in the starting folder i
 
     build/linux/x86_64/zaimport/zaimport <prod.keys> extracted <base.nsp> [<update.nsp>] [<dlc.nsp>...]
     GAME=1 JOBS=3 tools/za/build-linux.sh
-    build/linux/x86_64/za/lasrecomp extracted --play
+    build/linux/x86_64/za/PokeV-Recomp extracted --play
 
 (`dist-linux.sh` builds zaimport into `build/linux/x86_64/zaimport/`.) Never commit `extracted/`, `generated/` or keys.
 

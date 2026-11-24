@@ -157,7 +157,7 @@ jobs:
       - name: Build macOS Executable
         if: matrix.platform == 'macos'
         run: |
-          make -j"$(sysctl -n hw.ncpu)" B=build/mac build/mac/lasrecomp
+          make -j"$(sysctl -n hw.ncpu)" B=build/mac build/mac/PokeV-Recomp
 
       # ---- Automated Tests ----
       - name: Run Automated Tests

@@ -1,4 +1,4 @@
-# Building LAS Recomp on Windows (x86-64)
+# Building PokeV-Recomp on Windows (x86-64)
 
 Status: part of main. Builds and runs the game on Vulkan (with your own game files); `make dist` packages the
 release zip.
@@ -17,7 +17,7 @@ From an MSYS2 UCRT64 shell, or Git Bash with MSYS2 first on PATH:
 
     export PATH="/c/msys64/ucrt64/bin:/c/msys64/usr/bin:$PATH"
     make gen        # once: recompile the game from extracted/exefs (your own game files; see the start screen)
-    make -j         # -> build/lasrecomp.exe and the game code library build/lasgame.dll
+    make -j         # -> build/PokeV-Recomp.exe and the game code library build/lasgame.dll
 
 Without `generated/` only the app is built: the start screen builds the game code itself when you set up the game
 files (as for players), given the generator and the compiler (`make gen-helper`, `tools/fetch_zig.sh`).
@@ -29,9 +29,9 @@ Run from a shell that has `C:\msys64\ucrt64\bin` on PATH (SDL3, FFmpeg, Vulkan, 
     make rando-helper   # the seed generator without Python (build/helper/rando-gen)
     make gen-helper     # the game code generator without Python (build/helper/lasgen)
     tools/fetch_zig.sh  # the compiler the start screen builds the game code with (build/zig)
-    make dist           # -> build/dist/LAS Recomp-<version>-windows.zip (no game code inside)
+    make dist           # -> build/dist/PokeV-Recomp-<version>-windows.zip (no game code inside)
 
-The zip's `LAS Recomp/` folder holds `lasrecomp.exe` (icon from `docs/icon/icon.ico`, via windres),
+The zip's `PokeV-Recomp/` folder holds `PokeV-Recomp.exe` (icon from `docs/icon/icon.ico`, via windres),
 `rando-gen/` and the MSYS2 DLLs. No installer: game files, saves, seeds and settings are kept next to the exe, so
 the folder must be writable (the app says so and quits if it isn't, e.g. under Program Files). A source checkout
 with `extracted/` in the starting folder keeps using that folder instead.

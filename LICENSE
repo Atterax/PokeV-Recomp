@@ -20,5 +20,6 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-This license covers LAS Recomp's own code. It does not cover The Legend of Zelda: Link's Awakening or any other
-Nintendo property, nor the third-party components in third_party/, which keep their own licenses.
+This license covers PokeV-Recomp's own code (and the upstream LAS Recomp code it is built on). It does not cover
+Pokémon Scarlet & Violet, The Legend of Zelda: Link's Awakening, or any other Nintendo property, nor the third-party
+components in third_party/, which keep their own licenses.

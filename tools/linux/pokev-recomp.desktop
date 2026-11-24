@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=PokeV Recomp
+Comment=Pokémon Violet & Scarlet, recompiled for PC (bring your own game files)
+Exec=PokeV-Recomp
+Icon=pokev-recomp
+Categories=Game;
+Terminal=false

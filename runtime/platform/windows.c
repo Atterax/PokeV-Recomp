@@ -709,7 +709,7 @@ static DWORD WINAPI sampler_main(void *arg) {
 }
 
 static DWORD WINAPI notice_thread(LPVOID text) {
-    MessageBoxA(NULL, text, "LAS Recomp", MB_ICONWARNING | MB_OK);
+    MessageBoxA(NULL, text, "PokeV-Recomp", MB_ICONWARNING | MB_OK);
     free(text);
     return 0;
 }
@@ -909,7 +909,7 @@ void plat_print_backtrace(void) {
         const char *s = plat_symbol(pc, &off);
         if (!s) s = rt_host_fn_name(pc, &off);
         if (s) fprintf(stderr, "  #%-2d %016llx %s+%llx\n", i, (unsigned long long)pc, s, (unsigned long long)off);
-        else fprintf(stderr, "  #%-2d %016llx lasrecomp+%llx\n", i, (unsigned long long)pc,
+        else fprintf(stderr, "  #%-2d %016llx PokeV-Recomp+%llx\n", i, (unsigned long long)pc,
                      (unsigned long long)(pc - exe));
     }
 }
@@ -999,7 +999,7 @@ void plat_dump_threads(void) {
             uint64_t off = 0;
             const char *s = m == exe || m == game ? rt_host_fn_name(pc, &off) : plat_symbol(pc, &off);
             if (s) len += snprintf(line + len, sizeof line - len, " %s+%llx", s, (unsigned long long)off);
-            else len += snprintf(line + len, sizeof line - len, " %s+%llx", m == game ? "lasgame" : "lasrecomp",
+            else len += snprintf(line + len, sizeof line - len, " %s+%llx", m == game ? "lasgame" : "PokeV-Recomp",
                                  (unsigned long long)(pc - (uint64_t)(uintptr_t)m));
             shown++;
         }
@@ -1043,7 +1043,7 @@ static void last_run_report(unsigned long pid) {
         if (render(NULL, ev, 1 /* EvtRenderEventXml */, sizeof xml - 2, xml, &used, &props)) {
             WideCharToMultiByte(CP_UTF8, 0, xml, -1, s, sizeof s, NULL, NULL);
             for (char *c = s; *c; c++) *c = (char)tolower((unsigned char)*c);
-            if (strstr(s, "lasrecomp") && strstr(s, want)) {
+            if ((strstr(s, "pokev-recomp") || strstr(s, "lasrecomp")) && strstr(s, want)) {
                 found = true;
                 char out[1024];
                 int n = snprintf(out, sizeof out, "[system] the last run (process %lu) ended without a report; Windows "

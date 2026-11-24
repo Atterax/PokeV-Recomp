@@ -67,8 +67,8 @@ fi
 # ---- AppDir: everything next to the executable (runtime/paths.c rt_resource), libraries in usr/lib
 rm -rf "$APPDIR" && mkdir -p "$APPDIR/usr/bin/gamelib-src" "$APPDIR/usr/lib"
 D=$APPDIR/usr/bin
-cp "$B/lasrecomp" "$D/"
-llvm-strip --strip-debug "$D/lasrecomp"  # (symbols stay: crash backtraces name functions)
+cp "$B/PokeV-Recomp" "$D/"
+llvm-strip --strip-debug "$D/PokeV-Recomp"  # (symbols stay: crash backtraces name functions)
 cp -R "$L/helper/lasgen" "$L/helper/zaprompts" build/zig "$D/"
 cp third_party/ooz/COPYING "$D/zaprompts/COPYING-GPLv3.txt"
 cp third_party/ooz/README.ZARecomp.md "$D/zaprompts/README-ooz.md"
@@ -94,18 +94,18 @@ cat > "$APPDIR/pokev-recomp.desktop" <<EOF
 Type=Application
 Name=PokeV-Recomp
 Comment=Pokémon Violet, recompiled for PC (bring your own game files)
-Exec=lasrecomp
+Exec=PokeV-Recomp
 Icon=pokev-recomp
 Categories=Game;
 Terminal=false
 EOF
 cp docs/icon/icon_1024.png "$APPDIR/pokev-recomp.png" && ln -sf pokev-recomp.png "$APPDIR/.DirIcon"
 
-# libraries: what lasrecomp needs (DT_NEEDED, recursively) that deps/ provides; anything else must be a system one
+# libraries: what PokeV-Recomp needs (DT_NEEDED, recursively) that deps/ provides; anything else must be a system one
 # (glibc, libstdc++, the Vulkan loader: a bundled loader would not find the user's GPU drivers)
 needed() { readelf -d "$1" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p'; }
 SYSTEM_LIBS='^(libc|libm|libdl|libpthread|librt|libresolv|libstdc\+\+|libgcc_s|libvulkan)\.so|^ld-linux'
-todo=("$D/lasrecomp")
+todo=("$D/PokeV-Recomp")
 while [ ${#todo[@]} -gt 0 ]; do
     f=${todo[0]}; todo=("${todo[@]:1}")
     for n in $(needed "$f"); do
@@ -119,11 +119,11 @@ while [ ${#todo[@]} -gt 0 ]; do
         fi
     done
 done
-patchelf --set-rpath '$ORIGIN/../lib' "$D/lasrecomp"
+patchelf --set-rpath '$ORIGIN/../lib' "$D/PokeV-Recomp"
 if ls "$APPDIR/usr/lib" | grep -iE 'x264|x265|xvid|postproc|vulkan'; then  # (no GPL codecs, no Vulkan loader)
     echo "dist-linux: library that must not ship"; exit 1
 fi
-! nm "$D/lasrecomp" | grep -q ' f_70'  # (no game code inside)
+! nm "$D/PokeV-Recomp" | grep -q ' f_70'  # (no game code inside)
 echo "bundled: $(ls "$APPDIR/usr/lib" | tr '\n' ' ')"
 du -sh "$APPDIR"
 

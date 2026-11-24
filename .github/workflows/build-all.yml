@@ -102,7 +102,9 @@ jobs:
       - name: Rename Output Zip
         shell: pwsh
         run: |
-          if (Test-Path "build/dist-za/ZA-Recomp-windows.zip") {
+          if (Test-Path "build/dist-za/PokeV-Recomp-windows.zip") {
+            Move-Item -Force "build/dist-za/PokeV-Recomp-windows.zip" "build/dist-za/PokeV-Recomp-windows-x64.zip"
+          } elseif (Test-Path "build/dist-za/ZA-Recomp-windows.zip") {
             Move-Item -Force "build/dist-za/ZA-Recomp-windows.zip" "build/dist-za/PokeV-Recomp-windows-x64.zip"
           }
 

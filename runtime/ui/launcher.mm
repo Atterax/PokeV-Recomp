@@ -157,7 +157,7 @@ static void *update_thread(void *) {
         std::string out = std::string(rt_data_root()) + "/cache/releases.json";
         mkdir((std::string(rt_data_root()) + "/cache").c_str(), 0755);
         const char *av[] = {curl.c_str(), "-fsSL", "--max-time", "15", "-H", "Accept: application/vnd.github+json",
-                            "-A", "LASRecomp/" LARECOMP_VERSION, RELEASES_URL, NULL};
+                            "-A", "PokeV-Recomp/" LARECOMP_VERSION, RELEASES_URL, NULL};
         PlatProc p = plat_spawn(av, out.c_str(), false);
         if (!p || plat_proc_wait(p, true) != 0) { remove(out.c_str()); return NULL; }
         if (FILE *f = fopen(out.c_str(), "rb")) {
@@ -250,7 +250,7 @@ static void *upd_thread(void *) {
     } else {
         g_upd_zip = zip;
         std::string curl = sys + "curl.exe";
-        const char *av[] = {curl.c_str(), "-fsSL", "--retry", "2", "--max-time", "1800", "-A", "LASRecomp/" LARECOMP_VERSION,
+        const char *av[] = {curl.c_str(), "-fsSL", "--retry", "2", "--max-time", "1800", "-A", "PokeV-Recomp/" LARECOMP_VERSION,
                             "-o", zip.c_str(), url.c_str(), NULL};
         PlatProc p = plat_spawn(av, NULL, false);
         if (!p || plat_proc_wait(p, true) != 0) return upd_fail("the download didn't finish"), (void *)NULL;

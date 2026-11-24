@@ -60,7 +60,7 @@ ifeq ($(PLATFORM),macos)
 SDL      := $(or $(DEPS),/opt/homebrew/opt/sdl3)
 FFMPEG   := $(or $(DEPS),/opt/homebrew/opt/ffmpeg)
 OPUS     := $(or $(DEPS),/opt/homebrew/opt/opus)
-EXE      := $(B)/lasrecomp
+EXE      := $(B)/PokeV-Recomp
 DEPINC   := -I$(SDL)/include -I$(FFMPEG)/include -I$(OPUS)/include
 LDFLAGS  := -L$(SDL)/lib -lSDL3 -Wl,-rpath,$(SDL)/lib -L$(FFMPEG)/lib -lavformat -lavcodec -lavutil -lswscale -Wl,-rpath,$(FFMPEG)/lib \
             $(if $(wildcard $(OPUS)/lib/libopus.a),$(OPUS)/lib/libopus.a,-L$(OPUS)/lib -lopus) \
@@ -73,7 +73,7 @@ GAMELIB  := $(B)/lasgame.dylib
 GAMELIB_LDFLAGS := -dynamiclib -undefined dynamic_lookup  # (the runtime functions it calls: the app's own)
 GAMELIB_SHARED := -shared -Wl,-undefined,dynamic_lookup  # (the same, for the start screen's build: zig cc)
 else ifeq ($(PLATFORM),linux)
-EXE      := $(B)/lasrecomp
+EXE      := $(B)/PokeV-Recomp
 DEPINC   := $(if $(DEPS),-I$(DEPS)/include)
 ifeq ($(ARCH),x86_64)
 GENARCH  ?= -march=x86-64-v3  # as on Windows: AVX2 + FMA for the lifted FP/SIMD code (checked at startup)
@@ -264,7 +264,7 @@ $(B)/rt/platform/windows_rc.o: runtime/platform/windows.rc docs/icon/icon.ico ru
 
 VERSION  := $(shell sed -n 's/^\#define LARECOMP_VERSION "\(.*\)"/\1/p' runtime/ui/launcher.mm)
 
-# macOS: build/LAS Recomp.app, runs on macOS $(APP_MIN)+: the game rebuilt for that in build/mac15 against build/deps
+# macOS: build/PokeV Recomp.app, runs on macOS $(APP_MIN)+: the game rebuilt for that in build/mac15 against build/deps
 # (`make deps`: SDL3, LGPL FFmpeg, keystone, Python, from pinned sources), the generator helper when built
 # (`make rando-helper` after `make deps`), packaged by tools/bundle_macos.sh. No game files or fonts.
 APP_MIN  := 15.0
@@ -273,14 +273,14 @@ deps:
 	MACOS_MIN=$(APP_MIN) tools/build_deps_macos.sh
 app:
 	@[ -f build/deps/lib/libSDL3.0.dylib ] || { echo "make deps first"; exit 1; }
-	$(MAKE) B=$(APP_B) MACOS_MIN=$(APP_MIN) DEPS=$(CURDIR)/build/deps $(APP_B)/lasrecomp
-	MACOS_MIN=$(APP_MIN) tools/bundle_macos.sh $(APP_B)/lasrecomp
+	$(MAKE) B=$(APP_B) MACOS_MIN=$(APP_MIN) DEPS=$(CURDIR)/build/deps $(APP_B)/PokeV-Recomp
+	MACOS_MIN=$(APP_MIN) tools/bundle_macos.sh $(APP_B)/PokeV-Recomp
 
-# macOS release disk image (the .app + an Applications shortcut to drag it onto): build/dist/LAS Recomp-<v>-macOS.dmg
+# macOS release disk image (the .app + an Applications shortcut to drag it onto): build/dist/PokeV Recomp-<v>-macOS.dmg
 dmg: app
 	tools/make_dmg.sh
 
-# Windows: build/dist/LAS Recomp-<version>-windows.zip, top folder "LAS Recomp/": the exe, the seed generator
+# Windows: build/dist/PokeV-Recomp-<version>-windows.zip, top folder "PokeV-Recomp/": the exe, the seed generator
 # helper (make rando-helper), what the start screen builds the game code with on the player's machine (make gen-helper,
 # tools/fetch_zig.sh slimmed by tools/zig_slim.sh: its runtime built ahead of time, gamelib-src/, the exe's import library)
 # and the DLLs they load (runs without MSYS2). No game code. The exe is a release build in $(WIN_B):
@@ -290,7 +290,7 @@ dmg: app
 # with build/deps-win/bin first (the FFmpeg DLL names are the same as MSYS2's GPL ones). vulkan-1.dll is left
 # out: every Vulkan driver installs the loader in System32. Saves, seeds and game files go next to the exe at run time.
 # Needs: Windows 10+ x64, a Vulkan 1.3 driver, an AVX2 CPU (GENARCH x86-64-v3; checked at startup).
-DIST     := build/dist/LAS Recomp
+DIST     := build/dist/PokeV-Recomp
 WIN_B    := build/win-release
 deps-windows:
 	tools/build_deps_windows.sh
@@ -318,13 +318,13 @@ dist:
 	PATH="$(CURDIR)/build/deps-win/bin:$$PATH" ldd $(WIN_B)/PokeV-Recomp.exe | awk '(/ucrt64/ || /deps-win/) && !/vulkan-1/ {print $$3}' | sort -u | \
 	    xargs -I{} cp -u {} "$(DIST)/"
 	! ls "$(DIST)" | grep -iE 'x264|x265|xvid|postproc'  # (no GPL codec libraries in the release)
-	cd build/dist && if command -v zip >/dev/null; then zip -qr "LAS Recomp-$(VERSION)-windows.zip" "LAS Recomp"; \
-	    else /c/Windows/System32/tar.exe -a -cf "LAS Recomp-$(VERSION)-windows.zip" "LAS Recomp"; fi
-	@echo "build/dist/LAS Recomp-$(VERSION)-windows.zip"
+	cd build/dist && if command -v zip >/dev/null; then zip -qr "PokeV-Recomp-$(VERSION)-windows.zip" "PokeV-Recomp"; \
+	    else /c/Windows/System32/tar.exe -a -cf "PokeV-Recomp-$(VERSION)-windows.zip" "PokeV-Recomp"; fi
+	@echo "build/dist/PokeV-Recomp-$(VERSION)-windows.zip"
 
 # Seed generator as a standalone helper, so players need no Python: build/helper/rando-gen/ (rando-gen[.exe] +
 # _internal/), frozen by PyInstaller from tools/rando/rando_gen.spec in its own venv (build/rando-venv). Ship the
-# rando-gen folder next to the exe (Windows) or as "LAS Recomp.app"/Contents/Resources/rando-gen (runtime/ui/rando_tab.mm
+# rando-gen folder next to the exe (Windows) or as "PokeV Recomp.app"/Contents/Resources/rando-gen (runtime/ui/rando_tab.mm
 # generator_cmd). PyInstaller only builds for the OS it runs on.
 # macOS arm64: the relocatable Python 3.12 and keystone from `make deps` (macOS 11+ / 15+: the helper runs where the
 #   app does); without them Homebrew's python@3.12 and keystone (then only on the macOS they were built for). The
