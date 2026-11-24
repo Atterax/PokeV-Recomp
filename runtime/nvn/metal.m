@@ -1146,7 +1146,7 @@ void renderer_save_texture_alpha(id<MTLTexture> tex, const char *path) {
     unsigned amax = 0;
     for (NSUInteger i = 0; i < w * h; i++) { a[i] = px[i * 4 + 3]; if (a[i] > amax) amax = a[i]; }
     CGColorSpaceRef cs = CGColorSpaceCreateDeviceGray();
-    CGContextRef ctx = CGBitmapContextCreate(a, w, h, 8, w, cs, kCGImageAlphaNone);
+    CGContextRef ctx = CGBitmapContextCreate(a, w, h, 8, w, cs, (CGBitmapInfo)kCGImageAlphaNone);
     CGImageRef img = CGBitmapContextCreateImage(ctx);
     CFURLRef url = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8 *)path, strlen(path), false);
     CGImageDestinationRef dest = CGImageDestinationCreateWithURL(url, (__bridge CFStringRef)UTTypePNG.identifier, 1, NULL);
@@ -1210,7 +1210,7 @@ void renderer_save_texture(id<MTLTexture> tex, const char *path) {
     uint8_t *px = malloc(w * h * 4);
     [dst getBytes:px bytesPerRow:w * 4 fromRegion:MTLRegionMake2D(0, 0, w, h) mipmapLevel:0];
     CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
-    CGContextRef ctx = CGBitmapContextCreate(px, w, h, 8, w * 4, cs, kCGImageAlphaPremultipliedLast);
+    CGContextRef ctx = CGBitmapContextCreate(px, w, h, 8, w * 4, cs, (CGBitmapInfo)kCGImageAlphaPremultipliedLast);
     CGImageRef img = CGBitmapContextCreateImage(ctx);
     CFURLRef url = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8 *)path, strlen(path), false);
     CGImageDestinationRef dest = CGImageDestinationCreateWithURL(url, (__bridge CFStringRef)UTTypePNG.identifier, 1, NULL);

@@ -1459,7 +1459,7 @@ static const char *_Atomic ui_stage;
 __declspec(dllimport) int __stdcall IsHungAppWindow(void *hwnd);
 #endif
 static void ui_watch(void) {
-    static bool stuck, hung;
+    static bool stuck;
     static uint64_t next;
     uint64_t now = SDL_GetTicksNS(), b = atomic_load(&ui_beat);
     if (!b || now < next) return;
@@ -1472,6 +1472,7 @@ static void ui_watch(void) {
         stuck = false;
     }
 #ifdef _WIN32
+    static bool hung;
     void *hwnd = SDL_GetPointerProperty(SDL_GetWindowProperties(window), SDL_PROP_WINDOW_WIN32_HWND_POINTER, NULL);
     bool h = hwnd && IsHungAppWindow(hwnd);
     if (h != hung) LOG("[ui] Windows %s the window as not responding\n", h ? "shows" : "no longer shows");

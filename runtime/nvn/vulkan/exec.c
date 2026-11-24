@@ -1580,8 +1580,9 @@ void vk_exec_init(void) {
     // Mesa's drivers aren't in Ryujinx's list. LARECOMP_GATHER_BIAS=<bits> forces it (0: off).
     {
         const char *e = getenv("LARECOMP_GATHER_BIAS");
-        uint32_t vendor = g_vk.props.vendorID, bits = 0;
+        uint32_t bits = 0;
 #ifdef _WIN32
+        uint32_t vendor = g_vk.props.vendorID;
         if (vendor == 0x8086 || vendor == 0x1002) bits = g_vk.props.limits.subTexelPrecisionBits;
 #endif
         if (e) bits = (uint32_t)atoi(e);

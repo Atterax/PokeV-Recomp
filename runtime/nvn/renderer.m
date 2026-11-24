@@ -765,7 +765,7 @@ static void begin_pass(void) {
     end_pass();
     st.rt_dirty = false;
     MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
-    int w = 0, h = 0;
+    int w = 0;
     for (int i = 0; i < st.rt.ncolor; i++) {
         NvnTexture *t = st.rt.color[i];
         if (!t) continue;
@@ -777,7 +777,8 @@ static void begin_pass(void) {
         extern bool renderer_texture_first_write(NvnTexture *t);
         extern bool renderer_texture_level_fresh(NvnTexture *t);
         extern bool renderer_texture_frame_fresh(NvnTexture *t);
-        bool fresh = renderer_texture_level_fresh(t) | renderer_texture_frame_fresh(t);
+        bool lf = renderer_texture_level_fresh(t), ff = renderer_texture_frame_fresh(t);
+        bool fresh = lf || ff;
         if (renderer_texture_first_write(t) || fresh) {
             rp.colorAttachments[i].loadAction = MTLLoadActionClear;
             rp.colorAttachments[i].clearColor = MTLClearColorMake(0, 0, 0, fresh ? 0 : 1);
@@ -792,7 +793,7 @@ static void begin_pass(void) {
         }
         rp.colorAttachments[i].storeAction = MTLStoreActionStore;
         if (!w) renderer_texture_scale(t, &pass_sx, &pass_sy);
-        w = (int)tex.width; h = (int)tex.height;
+        w = (int)tex.width;
     }
     if (st.rt.depth) {
         renderer_mark_gpu_owned(st.rt.depth);
@@ -1047,7 +1048,6 @@ static void clear(int index, int kind, const void *color, uint32_t mask, bool de
 // ------------------------------------------------------------------ shaders (debug dump)
 static void dump_program(NvnProgram *p) {
     if (!getenv("LARECOMP_DUMP_SHADERS")) return;
-    static int n;
     mkdir("build/shaders", 0755);
     for (int s = 0; s < 6; s++) {
         if (!(p->stage_mask & (1u << s))) continue;
@@ -1061,7 +1061,6 @@ static void dump_program(NvnProgram *p) {
         fwrite(p->stages[s].control, 1, 0x4000, f);
         fclose(f);
     }
-    n++;
 }
 
 // ------------------------------------------------------------------ draw support
@@ -2073,8 +2072,8 @@ static void bind_textures(int stage, ShaderInfo *si) {
                     static int once;
                     if (!once++ || g_debug_frame) {
                         id<MTLTexture> base = renderer_texture(e->tex, nil, false);
-                        LOG("[dtex] glyph cache target %u depth %u layers %u levels %u stride %u flags %#x base type %lu arrlen %lu\n",
-                            e->tex->target, e->tex->depth, e->tex->layout.layers, e->tex->levels, e->tex->stride, e->tex->flags,
+                        LOG("[dtex] glyph cache target %u depth %u layers %u levels %u stride %llu flags %#x base type %lu arrlen %lu\n",
+                            e->tex->target, e->tex->depth, e->tex->layout.layers, e->tex->levels, (unsigned long long)e->tex->stride, e->tex->flags,
                             (unsigned long)base.textureType, (unsigned long)base.arrayLength);
                         LOG("[dtex] glyph view: has %d mask %#x levels %u+%u layers %u+%u fmt %#x target %u\n", e->has_view, e->view.setmask,
                             e->view.base_level, e->view.num_levels, e->view.min_layer, e->view.num_layers, e->view.format, e->view.target);
@@ -2104,7 +2103,7 @@ static void bind_textures(int stage, ShaderInfo *si) {
                         snprintf(rp, sizeof rp, "build/raw_%llx.bin", e->tex->addr);
                         FILE *rf = fopen(rp, "wb");
                         if (rf) { fwrite(p, 1, total, rf); fclose(rf); }
-                        LOG("[dtex] linear texture stride %u -> %s\n", e->tex->stride, rp);
+                        LOG("[dtex] linear texture stride %llu -> %s\n", (unsigned long long)e->tex->stride, rp);
                     }
                 }
                 LOG("[dtex] slot %d tex %ux%u f%#x addr %llx size %llu nonzero %llu gpu_owned %d\n", i, e->tex->width,
@@ -3838,7 +3837,7 @@ static void copy_texture(const TexRefRec *src, const TexRefRec *dst, uint64_t fl
         static int nl;
         uint64_t total = tegra_total_size(&st_->layout), nz = 0;
         for (uint64_t k = 0; k < total && st_->addr; k++) nz += ((const uint8_t *)(uintptr_t)st_->addr)[k] != 0;
-        if (nl < 400) LOG("[copytex] src addr %llx size %llu nonzero %llu tflags %#x stride %u bh %u\n", st_->addr, total, nz, st_->flags, st_->stride, st_->layout.block_height_log2);
+        if (nl < 400) LOG("[copytex] src addr %llx size %llu nonzero %llu tflags %#x stride %llu bh %u\n", st_->addr, total, nz, st_->flags, (unsigned long long)st_->stride, st_->layout.block_height_log2);
         if (nl++ < 400) LOG("[copytex] %ux%u f%#x (%d,%d %dx%d) -> %ux%u f%#x (%d,%d %dx%d) flags %llx src_gpu %d\n", st_->width, st_->height, st_->format,
             sr[0], sr[1], sr[3], sr[4], dt->width, dt->height, dt->format, dr[0], dr[1], dr[3], dr[4], flags, renderer_is_gpu_owned(st_));
     }
@@ -4050,6 +4049,7 @@ static void exec_list(uint64_t handle, int depth) {
             int index = (int)r->x[0];
             static int log_clears = -1;  // LARECOMP_LOG_CLEARS: every colour clear (frame, target size, mask, scissor)
             if (log_clears < 0) log_clears = getenv("LARECOMP_LOG_CLEARS") != NULL;
+            extern uint64_t renderer_present_count(void);
             if (log_clears && index < st.rt.ncolor && st.rt.color[index])
                 LOG("[cclear] frame %llu idx %d %ux%u f%#x mask %#x scissor %d,%d %dx%d\n", (unsigned long long)renderer_present_count(),
                     index, st.rt.color[index]->width, st.rt.color[index]->height, st.rt.color[index]->format, (uint32_t)r->x[2],
