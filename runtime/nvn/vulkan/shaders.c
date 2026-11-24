@@ -989,6 +989,10 @@ static const char *builtin_src(const char *name, int *stage) {
                 "      float dzs;\n"
                 "      vec2 qa = to_uv(vp, S + side, dzs), qb = to_uv(vp, S - side, dzs);\n"
                 "      if (depth_at(t1, qa) <= dz || depth_at(t1, qb) <= dz) run = 0.0;\n"
+                // (and far in front of the ray - a tree's crown between the camera and the sea - it only hides the ray
+                // on screen, as a thin thing does: the ray passes far behind it. Counted hidden, its leaves' shade
+                // darkened the reflection in streaks down the sea, a column wherever the crown hid the ray)
+                "      else if (ls < 0.5 * lq) run = 0.0;\n"
                 "      else {\n"
                 "        if (n_hidden == 0.0) occ_q = q;\n"
                 "        n_hidden += 1.0;\n"
