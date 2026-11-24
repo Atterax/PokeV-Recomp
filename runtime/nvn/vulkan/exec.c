@@ -3536,6 +3536,7 @@ static float mv_vp[2][16];
 // resolved the frame before (a frame it doesn't resolve is never shown jittered: at most the first one)
 static float fsr2_jx, fsr2_jy;
 static uint64_t fsr2_jit_frame = ~0ull, fsr2_ok_frame = ~0ull;
+static NvnTexture *fsr2_pic;  // the picture resolved last (fsr2_copy: its interface's first draw starts the early resolve)
 static uint32_t fsr2_scene_w, fsr2_scene_h;  // (the scene depth's size: mv_note_draw)
 static bool fsr2_wanted(void) {  // (F1 > Video > Temporal anti-aliasing; LARECOMP_FSR2=0 / 1 overrides it)
     static int env = -2;
@@ -3579,6 +3580,7 @@ void vk_exec_texture_destroyed(NvnTexture *t) {
     for (int i = 0; i < 2; i++) if (hdr_snaps[i].shown == t) hdr_snaps[i].shown = NULL;
     if (hdr_game && hdr_game == t->backend) hdr_game = NULL;
     if (mv_depth == t) mv_depth = NULL;
+    if (fsr2_pic == t) fsr2_pic = NULL;
     gtao_forget(t);
 }
 void vk_alias_reset(void) { naliases = 0; }  // (reboot: every texture goes)
@@ -9213,8 +9215,9 @@ static VkImageView post_view(TexBackend *d) {
 // is copied into the shown image. Only at the scene's own size for now (no upscaling), not with Dynamic resolution.
 
 // Its images (kept until the size changes): 0 motion vectors (RG16F), 1 reactive mask (R8), 2 FSR 2's output (RGBA8)
+// (3: DLAA's output as sRGB, dlaa_raw_in)
 static TexBackend *fsr2_image(int i, VkFormat f, uint32_t w, uint32_t h, VkImageUsageFlags usage) {
-    static TexBackend img[3];
+    static TexBackend img[4];
     TexBackend *d = &img[i];
     if (d->image && (d->width != w || d->height != h)) {
         vk_views_forget(d);
@@ -9297,19 +9300,60 @@ static void inv4(const float *m, float *o) {  // (a 4x4 inverse; the same layout
     for (int i = 0; i < 16; i++) o[i] = a[i] * r;
 }
 
-// Called for each draw with its program: true when this draw was the game's copy into its shown image and FSR 2 did
-// it instead (the draw is then skipped)
+// The picture the game copies into its shown image: its own interface drawn over it before that copy (the area's name
+// after a fast travel, the minimap) went through DLAA with the scene - DLSS moved the letters with the camera's motion
+// and blended them with their last places: the name smeared while the camera turned. With DLAA the picture is
+// resolved in place when the interface's first draw into it comes (no depth target: not the scene - fsr2_early),
+// and that interface is drawn over the result as it is; the game's copy then only brings the picture over (decoded,
+// as its own copy does). LARECOMP_DLAA_EARLY=0: resolved at the copy, interface included, as before
+// (fsr2_pic: declared with fsr2_ok_frame)
+static uint64_t fsr2_early_frame = ~0ull;
+static bool fsr2_logged_early;
+static bool fsr2_copy_(Prog *pr, NvnTexture *early);
+static bool fsr2_early_on(void) {
+    static int on = -1;
+    if (on < 0) on = !ENV("LARECOMP_DLAA_EARLY") || atoi(ENV("LARECOMP_DLAA_EARLY")) != 0;
+    return on && g_settings.taa == TAA_DLAA && vk_dlaa_available();
+}
 static bool fsr2_copy(Prog *pr) {
     extern uint64_t vk_frame_counter(void);
     uint64_t f = vk_frame_counter();
-    NvnTexture *dst = st.rt.color[0];
-    TexBackend *db = dst ? dst->backend : NULL;
+    NvnTexture *rt = st.rt.color[0];
+    if (fsr2_early_frame == f && fsr2_ok_frame == f && rt && rt != fsr2_pic && frag_tex(pr, 0) == fsr2_pic && fsr2_pic) {
+        // the copy of a picture resolved early: brought over as it is (decoded: the blit), and the draw skipped
+        TexBackend *db = rt->backend, *sb = fsr2_pic->backend;
+        if (!db || !sb || st.color_state[0] || !db->presented || sb->width != db->width || sb->height != db->height) return false;
+        fsr2_early_frame = ~0ull;
+        vk_end_pass();
+        renderer_texture_frame_fresh(rt), renderer_texture_level_fresh(rt), renderer_texture_first_write(rt);
+        VkCommandBuffer cb = vk_cmd();
+        vk_full_barrier(cb);
+        VkImageBlit bl = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .srcOffsets = {{0, 0, 0}, {(int32_t)sb->width, (int32_t)sb->height, 1}},
+                          .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .dstOffsets = {{0, 0, 0}, {(int32_t)db->width, (int32_t)db->height, 1}}};
+        rec_CmdBlitImage(cb, sb->image, VK_IMAGE_LAYOUT_GENERAL, db->image, VK_IMAGE_LAYOUT_GENERAL, 1, &bl, VK_FILTER_NEAREST);
+        vk_full_barrier(cb);
+        return true;
+    }
+    // the interface's first draw into last frame's picture (no depth target, blended): the picture resolved now
+    if (fsr2_early_on() && fsr2_ok_frame != f && rt && rt == fsr2_pic && !st.rt.depth && (st.color_state[0] & 1) && mv_frame[0] == f) {
+        if (fsr2_copy_(pr, rt)) fsr2_early_frame = f;
+        return false;  // (the draw goes on, over the resolved picture)
+    }
+    return fsr2_copy_(pr, NULL);
+}
+// Called for each draw with its program: true when this draw was the game's copy into its shown image and FSR 2 did
+// it instead (the draw is then skipped). early: the picture resolved in place, before its interface (fsr2_copy)
+static bool fsr2_copy_(Prog *pr, NvnTexture *early) {
+    extern uint64_t vk_frame_counter(void);
+    uint64_t f = vk_frame_counter();
+    NvnTexture *dst = early ? NULL : st.rt.color[0];
+    TexBackend *db = early ? early->backend : dst ? dst->backend : NULL;  // (early: the sizes are the picture's own)
     // (once a frame: this frame's scene is resolved already. ZA Recomp #175: a menu's full-screen background drawn
     // unblended into the shown image afterwards, from a mipmapped picture, went through FSR as a second "copy" and
     // showed as a mosaic of mip 0's stale squares. A copy's source has one level)
     if (fsr2_ok_frame == f) return false;
-    if (!db || st.color_state[0] || !db->presented || mv_frame[0] != f || !mv_depth || !mv_depth->backend) return false;
-    NvnTexture *src = frag_tex(pr, 0);
+    if (!db || (!early && (st.color_state[0] || !db->presented)) || mv_frame[0] != f || !mv_depth || !mv_depth->backend) return false;
+    NvnTexture *src = early ? early : frag_tex(pr, 0);
     TexBackend *sb = src ? src->backend : NULL, *zb = mv_depth->backend;
     if (!sb || !sb->image || src == dst || sb->levels > 1 || sb->width != db->width || sb->height != db->height || sb->width != zb->width ||
         sb->height != zb->height || (sb->aspect & ~VK_IMAGE_ASPECT_COLOR_BIT))
@@ -9324,7 +9368,18 @@ static bool fsr2_copy(Prog *pr) {
     static const VkComponentMapping id = {0};
     VkImageView zv = vk_image_view(zb, VK_IMAGE_VIEW_TYPE_2D, zb->format, 0, 1, 0, 1, id, VK_IMAGE_ASPECT_DEPTH_BIT);
     VkImageView sv = vk_image_view(zb, VK_IMAGE_VIEW_TYPE_2D, zb->format, 0, 1, 0, 1, id, VK_IMAGE_ASPECT_STENCIL_BIT);
-    VkImageView cv = vk_image_view(sb, VK_IMAGE_VIEW_TYPE_2D, sb->format, 0, 1, 0, 1, id, VK_IMAGE_ASPECT_COLOR_BIT);
+    // DLAA gets an sRGB picture's encoded values (through its UNORM twin), and its output is decoded into the shown
+    // image (copied as is into an sRGB image, then blitted: the blit decodes, as the game's own copy does). Read as
+    // linear light, as before, the darkest tones had a few steps each: when the screen fades to black (fast travel)
+    // DLSS's output showed a grid of squares over every flat surface, and its 8-bit linear output kept them. DLSS
+    // expects a picture that isn't HDR in its display encoding. (FSR 2: as before.) LARECOMP_DLAA_RAWIN=0: as before
+    static int raw_in = -1;
+    if (raw_in < 0) raw_in = !ENV("LARECOMP_DLAA_RAWIN") || atoi(ENV("LARECOMP_DLAA_RAWIN")) != 0;
+    bool dlaa_raw = raw_in && g_settings.taa == TAA_DLAA && vk_dlaa_available() && sb->format == VK_FORMAT_R8G8B8A8_SRGB;
+    TexBackend *eb = dlaa_raw ? fsr2_image(3, VK_FORMAT_R8G8B8A8_SRGB, w, h, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT) : NULL;
+    if (dlaa_raw && !eb) dlaa_raw = false;
+    VkFormat cfmt = dlaa_raw ? VK_FORMAT_R8G8B8A8_UNORM : sb->format;
+    VkImageView cv = vk_image_view(sb, VK_IMAGE_VIEW_TYPE_2D, cfmt, 0, 1, 0, 1, id, VK_IMAGE_ASPECT_COLOR_BIT);
     if (!zv || !sv || !cv) return false;
     // ---- the motion vectors and the reactive mask
     static VkPipelineLayout layout;
@@ -9431,7 +9486,7 @@ static bool fsr2_copy(Prog *pr) {
     float p11 = sqrtf(m[1] * m[1] + m[5] * m[5] + m[9] * m[9]);  // (the projection's y scale: the y row's length)
     VkFsr2Frame fr = {.color = sb->image, .depth = zb->image, .mv = mvb->image, .reactive = rb->image, .out = ob->image,
                       .color_view = cv, .depth_view = zv, .mv_view = post_view(mvb), .reactive_view = post_view(rb), .out_view = post_view(ob),
-                      .color_format = sb->format, .depth_format = zb->format, .out_format = VK_FORMAT_R8G8B8A8_UNORM,
+                      .color_format = cfmt, .depth_format = zb->format, .out_format = VK_FORMAT_R8G8B8A8_UNORM,
                       .w = w, .h = h, .ow = w, .oh = h, .jx = fsr2_jx, .jy = fsr2_jy, .dt_ms = fminf(fmaxf(dt, 1), 100),
                       .near_z = m[14] > 0 ? m[14] : 0.1f, .fov_y = p11 > 0 ? 2 * atanf(1 / p11) : 1.0f, .sharpness = 0, .reset = reset};
     VkCommandBuffer sec = fsr2_cmd();
@@ -9441,12 +9496,25 @@ static bool fsr2_copy(Prog *pr) {
     if (!ok) return false;
     // (the shown image's first pass this frame is now the HUD's: a target's first pass in a frame clears it -
     // renderer_texture_frame_fresh - which would wipe the copy below. Taken as done here.)
-    renderer_texture_frame_fresh(dst), renderer_texture_level_fresh(dst), renderer_texture_first_write(dst);
+    if (dst) renderer_texture_frame_fresh(dst), renderer_texture_level_fresh(dst), renderer_texture_first_write(dst);
     rec_CmdExecuteCommands(cb, 1, &sec);
     vk_full_barrier(cb);
     VkImageCopy c = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
                      .extent = {w, h, 1}};
-    rec_CmdCopyImage(cb, ob->image, VK_IMAGE_LAYOUT_GENERAL, db->image, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
+    if (early) {  // (back into the picture: encoded values copied as they are, linear ones encoded by a blit)
+        if (dlaa_raw) rec_CmdCopyImage(cb, ob->image, VK_IMAGE_LAYOUT_GENERAL, sb->image, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
+        else {
+            VkImageBlit bl = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .srcOffsets = {{0, 0, 0}, {(int32_t)w, (int32_t)h, 1}},
+                              .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .dstOffsets = {{0, 0, 0}, {(int32_t)w, (int32_t)h, 1}}};
+            rec_CmdBlitImage(cb, ob->image, VK_IMAGE_LAYOUT_GENERAL, sb->image, VK_IMAGE_LAYOUT_GENERAL, 1, &bl, VK_FILTER_NEAREST);
+        }
+    } else if (dlaa_raw) {  // (encoded values: decoded on the way into the shown image)
+        rec_CmdCopyImage(cb, ob->image, VK_IMAGE_LAYOUT_GENERAL, eb->image, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
+        vk_full_barrier(cb);
+        VkImageBlit bl = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .srcOffsets = {{0, 0, 0}, {(int32_t)w, (int32_t)h, 1}},
+                          .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .dstOffsets = {{0, 0, 0}, {(int32_t)w, (int32_t)h, 1}}};
+        rec_CmdBlitImage(cb, eb->image, VK_IMAGE_LAYOUT_GENERAL, db->image, VK_IMAGE_LAYOUT_GENERAL, 1, &bl, VK_FILTER_NEAREST);
+    } else rec_CmdCopyImage(cb, ob->image, VK_IMAGE_LAYOUT_GENERAL, db->image, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
     vk_full_barrier(cb);
     {   // (debug) LARECOMP_FSR2_DUMP=<frame>: its inputs and output that frame -> build/fsr2_*.png
         static long at = -2;
@@ -9459,9 +9527,13 @@ static bool fsr2_copy(Prog *pr) {
         }
     }
     static int nlog;
-    if (nlog++ < 3) LOG("[%s] frame %llu: %ux%u, jitter %.3f %.3f%s\n", dlaa ? "dlaa" : "fsr2", (unsigned long long)f, w, h, fsr2_jx,
-                        fsr2_jy, reset ? ", reset" : "");
+    if (nlog++ < 3 || (early && !fsr2_logged_early))
+        LOG("[%s] frame %llu: %ux%u, jitter %.3f %.3f%s; picture format %d, shown image's %d%s\n", dlaa ? "dlaa" : "fsr2",
+            (unsigned long long)f, w, h, fsr2_jx, fsr2_jy, reset ? ", reset" : "", (int)sb->format, (int)db->format,
+            early ? "; resolved before the interface drawn over it" : "");
+    if (early) fsr2_logged_early = true;
     fsr2_ok_frame = f;
+    fsr2_pic = src;
     return true;
 }
 
