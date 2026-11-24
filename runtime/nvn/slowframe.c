@@ -143,10 +143,12 @@ void slow_frame_present(uint64_t now, uint64_t gcpu) {
             LOG("%s\n", b);
             // (held up by the GPU - this thread waiting on it or on the render thread, which waits on it - with little
             // CPU work: the next frame's GPU time per pass, Vulkan: exec.c vk_gpuprof_request)
+#ifndef __APPLE__
             extern void vk_gpuprof_request(void) __attribute__((weak));
             uint64_t held = d(cur.wait_ns, prev.wait_ns) + d(cur.rqw, prev.rqw);
             if (vk_gpuprof_request && held * 2 > gap && !d(cur.pipes, prev.pipes) && !d(cur.progs, prev.progs))
                 vk_gpuprof_request();
+#endif
         }
     }
     prev = cur;
