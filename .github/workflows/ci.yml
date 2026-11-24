@@ -268,11 +268,15 @@ jobs:
             clang --version
           fi
           tests=(
+            tools/test_build_cache.py
+            tools/test_dynres.py
             tools/test_fence_sequence.py
             tools/test_field_regions.py
             tools/test_flagfuse.py
             tools/test_game_identity.py
+            tools/test_pace.py
             tools/test_regpromote.py
+            tools/test_settings.py
             tools/test_widescreen_proj.py
             tools/test_xbox_attack_prepare.py
           )
