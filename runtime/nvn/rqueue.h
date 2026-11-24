@@ -12,6 +12,9 @@ bool rq_on(void);
 // Queue items (the game's threads). Item numbers count up from 1; a fence refers to the item that holds it.
 uint64_t rq_submit_lists(const uint64_t *handles, int n);  // a whole nvnQueueSubmitCommands call, one item
 uint64_t rq_submit(uint64_t handle);                     // a recorded command list (nvnQueueSubmitCommands)
+// (cmdbuf.c, nvnCommandBufferEndRecording) a list just recorded: its fences' sync objects and the lists it calls -
+// its submission then looks them up instead of walking its records. many: it had more than the recorder kept.
+void rq_list_ended(uint64_t handle, const uint64_t *fences, int nf, const uint64_t *calls, int nc, bool many);
 void rq_present(NvnTexture *t, uint64_t frame, bool advance);  // show t (the present pass, overlay, shots); advance:
                                                               // a new frame (false: backend_represent's repeat)
 void rq_destroy_texture(NvnTexture *t);                  // backend_texture_destroyed + free(t), in queue order

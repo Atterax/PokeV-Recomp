@@ -125,6 +125,11 @@ typedef struct {
     uint64_t guest;  // the guest NVNcommandBuffer*
     uint64_t owner;  // in a host overflow chunk (cmdbuf.c): the guest chunk whose list jumped there, else 0
     uint64_t hw_size, hw_left;  // the game's last chunk: its size, and what the hardware's commands would leave of it
+    // the list being recorded: its fences' sync objects and the lists it calls, for rqueue.c's list table (rq_list_ended);
+    // lmany: more fences than lfence holds (its submission walks it, as before)
+    uint64_t lfence[8], *lcall;
+    int nlfence, nlcall, lcall_cap;
+    bool lmany;
 } NvnCmdBuf;
 
 // One recorded command: header, the call's integer and float arguments, then copied data.

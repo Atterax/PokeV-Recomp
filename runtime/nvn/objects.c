@@ -1,5 +1,6 @@
 // NVN objects, builders, and state objects (everything except command recording).
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -732,6 +733,8 @@ static NvnDescPool *desc_pool_init(uint64_t guest, uint64_t pool, uint64_t off, 
     G(uint64_t, guest, 8) = pool;
     G(uint64_t, guest, 16) = off;
     G(uint32_t, guest, 24) = (uint32_t)count;
+    extern _Atomic uint32_t g_pool_gen;
+    atomic_fetch_add(&g_pool_gen, 1);  // (a new pool may sit where a finalized one was)
     pthread_mutex_lock(&g_pool_lock);  // (pool_entries_forget walks the registry)
     for (int i = 0; i < 64; i++) if (!reg[i]) { reg[i] = d; break; }
     pthread_mutex_unlock(&g_pool_lock);
@@ -757,8 +760,12 @@ typedef struct { int n, cap; PoolReg r[]; } PoolRegs;
 static PoolRegs *g_regs;  // (g_pool_lock) not queued yet
 RT_ON_RESET(pool_regs_reset) { free(g_regs); g_regs = NULL; }
 
+// Bumped at every change to a texture pool's entries (registrations, finalized textures' slots): what was derived
+// from an entry stays good while it's unchanged (vulkan/exec.c stencil_slots)
+_Atomic uint32_t g_pool_gen = 1;
 static void pool_reg_apply(const PoolReg *r) {  // (g_pool_lock held)
     NvnTexEntry *e = &((NvnTexEntry *)r->d->entries)[r->id];
+    atomic_fetch_add(&g_pool_gen, 1);
     if (e->tex && e->tex->pool_refs) e->tex->pool_refs--;
     e->tex = r->tex;
     if (e->tex) e->tex->pool_refs++;
@@ -857,6 +864,7 @@ static void pool_entries_forget(NvnTexture *t) {
                 ents[i].dead_format = t->format + 1;
                 t->pool_refs--;
                 n++;
+                atomic_fetch_add(&g_pool_gen, 1);
             }
     }
     pthread_mutex_unlock(&g_pool_lock);
@@ -1042,7 +1050,11 @@ NVN(nvnQueuePresentTexture) {
         }
         present_pace(w->interval);
         backend_present(HOST(NvnTexture, w->textures[i]));
-        if (i < 8) w->present_seq[i] = renderer_fence_seq();  // (the submission just presented)
+        // (the present just queued: a render queue item with the queue on, as nvnQueueFenceSync's - nvnSyncWait takes
+        // the number as one. The GPU submission number it was got ahead of the items, ~3 submissions a frame to ~2
+        // items: a few minutes in (sooner the faster the game ran) every wait was on the newest frame, untranslated -
+        // the GPU overlap lost, a Violet town at World detail 4x down from 60 to ~42 fps for good)
+        if (i < 8) w->present_seq[i] = rq_on() ? rq_fence_seq() : renderer_fence_seq();
     }
 }
 
