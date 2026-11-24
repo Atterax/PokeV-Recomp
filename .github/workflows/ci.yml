@@ -1,0 +1,200 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux (Ubuntu x86_64)
+            os: ubuntu-latest
+            platform: linux
+          - name: Windows (MSYS2 UCRT64)
+            os: windows-2022
+            platform: windows
+          - name: macOS (Apple Silicon)
+            os: macos-latest
+            platform: macos
+
+    steps:
+      - name: Configure Git Line Endings (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: git config --global core.autocrlf false
+
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # ---- Linux (Ubuntu) ----
+      - name: Install Linux Dependencies
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang lld cmake ninja-build pkg-config nasm python3-venv curl git \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev \
+            libxss-dev libxfixes-dev libxtst-dev libxkbcommon-dev \
+            libwayland-dev wayland-protocols libdecor-0-dev libegl-dev \
+            libdrm-dev libgbm-dev libpulse-dev libasound2-dev libpipewire-0.3-dev \
+            libdbus-1-dev libudev-dev libibus-1.0-dev libvulkan-dev libopus-dev
+
+      - name: Cache Linux Dependencies
+        if: matrix.platform == 'linux'
+        uses: actions/cache@v4
+        with:
+          path: build/linux/x86_64/deps
+          key: linux-deps-${{ hashFiles('tools/linux/build_deps.sh') }}
+
+      - name: Build Linux Executable
+        if: matrix.platform == 'linux'
+        run: |
+          bash tools/za/build-linux.sh
+
+      # ---- Windows (MSYS2 UCRT64) ----
+      - name: Setup MSYS2 UCRT64 Toolchain
+        if: matrix.platform == 'windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          location: 'C:\msys64'
+          msystem: UCRT64
+          update: false
+          path-type: inherit
+          install: make nasm diffutils
+
+      - name: Install MSYS2 UCRT64 Packages
+        if: matrix.platform == 'windows'
+        shell: msys2 {0}
+        run: |
+          sed -i 's/#DisableDownloadTimeout/DisableDownloadTimeout/g' /etc/pacman.conf || true
+          grep -q "DisableDownloadTimeout" /etc/pacman.conf || echo "DisableDownloadTimeout" >> /etc/pacman.conf
+          sed -i 's/#ParallelDownloads = 5/ParallelDownloads = 5/g' /etc/pacman.conf || true
+          for i in 1 2 3 4 5; do
+            echo "Pacman install attempt $i..."
+            if pacman -S --needed --noconfirm --disable-download-timeout \
+              mingw-w64-ucrt-x86_64-clang \
+              mingw-w64-ucrt-x86_64-lld \
+              mingw-w64-ucrt-x86_64-gcc \
+              mingw-w64-ucrt-x86_64-binutils \
+              mingw-w64-ucrt-x86_64-sdl3 \
+              mingw-w64-ucrt-x86_64-vulkan-devel \
+              mingw-w64-ucrt-x86_64-shaderc \
+              mingw-w64-ucrt-x86_64-spirv-tools \
+              mingw-w64-ucrt-x86_64-pkgconf \
+              mingw-w64-ucrt-x86_64-vulkan-memory-allocator \
+              mingw-w64-ucrt-x86_64-opus; then
+              echo "Pacman packages installed successfully!"
+              exit 0
+            fi
+            echo "Attempt $i failed, retrying in 5s..."
+            sleep 5
+          done
+          echo "All pacman install attempts failed!"
+          exit 1
+
+      - name: Setup Python (Windows)
+        if: matrix.platform == 'windows'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Cache Windows Dependencies
+        if: matrix.platform == 'windows'
+        uses: actions/cache@v4
+        with:
+          path: build/deps-win
+          key: win-deps-${{ hashFiles('tools/build_deps_windows.sh') }}
+
+      - name: Build Windows Executable
+        if: matrix.platform == 'windows'
+        shell: bash
+        run: |
+          unset INCLUDE LIB LIBPATH
+          UCRT_DIR=""
+          for candidate in \
+            "/d/a/_temp/setup-msys2/msys64/ucrt64/bin" \
+            "/c/msys64/ucrt64/bin" \
+            "/c/hostedtoolcache/windows/msys64/ucrt64/bin"; do
+            if [ -x "$candidate/clang.exe" ]; then
+              UCRT_DIR="$candidate"
+              break
+            fi
+          done
+          if [ -z "$UCRT_DIR" ]; then
+            UCRT_CLANG=$(find /d/a/_temp /c -maxdepth 5 -name "clang.exe" 2>/dev/null | grep -i "ucrt64/bin/clang.exe" | head -n 1 || true)
+            [ -n "$UCRT_CLANG" ] && UCRT_DIR=$(dirname "$UCRT_CLANG")
+          fi
+          CLEAN_PATH=$(echo "$PATH" | tr ':' '\n' | grep -v -i "Program Files/LLVM" | grep -v -i "Windows Kits" | tr '\n' ':')
+          export PATH="$UCRT_DIR:$(dirname "$UCRT_DIR")/usr/bin:$CLEAN_PATH"
+          echo "$UCRT_DIR" >> "$GITHUB_PATH"
+          echo "$(dirname "$UCRT_DIR")/usr/bin" >> "$GITHUB_PATH"
+          bash tools/build_deps_windows.sh
+          make -j"$(nproc)" B=build/win DEPS="$PWD/build/deps-win" RELEASE=1 build/win/PokeV-Recomp.exe
+          ! nm build/win/PokeV-Recomp.exe | grep -q ' f_70'
+
+      # ---- macOS (Apple Silicon) ----
+      - name: Install macOS Dependencies
+        if: matrix.platform == 'macos'
+        run: |
+          brew install sdl3 ffmpeg opus
+
+      - name: Build macOS Executable
+        if: matrix.platform == 'macos'
+        run: |
+          make -j"$(sysctl -n hw.ncpu)" B=build/mac build/mac/lasrecomp
+
+      # ---- Automated Tests ----
+      - name: Run Automated Tests
+        shell: bash
+        env:
+          PYTHONUTF8: "1"
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.platform }}" = "windows" ]; then
+            unset INCLUDE LIB LIBPATH
+            CLEAN_PATH=$(echo "$PATH" | tr ':' '\n' | grep -v -i "Program Files/LLVM" | grep -v -i "Windows Kits" | tr '\n' ':')
+            export PATH="$CLEAN_PATH"
+            which clang
+            clang --version
+          fi
+          tests=(
+            tools/test_fence_sequence.py
+            tools/test_field_regions.py
+            tools/test_flagfuse.py
+            tools/test_game_identity.py
+            tools/test_regpromote.py
+            tools/test_widescreen_proj.py
+            tools/test_xbox_attack_prepare.py
+          )
+          if [ "${{ matrix.platform }}" != "macos" ]; then
+            tests+=(
+              tools/test_vulkan_overlay.py
+              tools/test_vulkan_sync_errors.py
+            )
+          fi
+          if [ "${{ matrix.platform }}" = "windows" ]; then
+            tests+=(
+              tools/test_windows_logs.py
+              tools/test_windows_processes.py
+            )
+          fi
+          for t in "${tests[@]}"; do
+            echo "=== Running $t ==="
+            python3 "$t"
+          done
