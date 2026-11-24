@@ -2475,7 +2475,9 @@ static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
 //     (slot 28) is bound while the ground's shaders draw - they never read it, and the translation (translate.c, by
 //     the slots each texture of a shader is read from) comes out the same. Once a program is translated, it is also
 //     found by its key with only the slots its shaders read (sess_put_masked / sess_get_masked); a shader reading a
-//     texture through a handle it loads (bindless) counts as reading every slot.
+//     texture through a handle it loads (bindless) counts as reading every slot. The programs prepared before the
+//     game (shader_prep.h) are entered so too: their records carry no stencil / integer slots, so a draw with the
+//     lighting's view bound found none of them - with a warm cache the first battle after starting still went black.
 // LARECOMP_VK_SESSION_PROGRAMS=0: off (built again, as before).
 static PrepEnt *sess_progs, *sess_cs, *sess_slots;  // content key -> Prog / CsProg; stage code hash -> its slots + 1<<32
 static size_t sess_progs_cap, sess_cs_cap, sess_slots_cap, sess_progs_n, sess_cs_n, sess_slots_n;
@@ -2510,7 +2512,7 @@ static bool sess_slots_of(uint64_t h, uint32_t *m) {
 // Not before: its translation reads the game's code at its own address, which may be freed by then (another battle).
 static void sess_put_masked(Prog *p) {
     if (!sess_on() || !p->sess_vh || !p->sess_fh) return;
-    PREP_PUT(sess_progs, p->sess_ck, p);
+    if (p->sess_ck) PREP_PUT(sess_progs, p->sess_ck, p);  // (a prepared one is in prep_progs by it already)
     uint32_t vm = sess_used_slots(p->vi), fm = sess_used_slots(p->fi);
     PREP_PUT(sess_slots, p->sess_vh, (void *)(uintptr_t)((uint64_t)vm | 1ull << 32));
     PREP_PUT(sess_slots, p->sess_fh, (void *)(uintptr_t)((uint64_t)fm | 1ull << 32));
@@ -6311,6 +6313,8 @@ bool renderer_prepare(const ShaderRec *r, const ShaderBlob *vsb, const ShaderBlo
         p->vkey = vkey;
         p->fkey = fkey;
         p->prep_vh = r->vs, p->prep_fh = r->fs;
+        p->sess_vh = r->vs, p->sess_fh = r->fs;  // (also found by the slots its shaders read: sess_put_masked - a
+                                                 // record has no stencil / integer slots, the draws often do)
         bool ok = translate_program_now(p);
         p->code[0] = p->code[1] = 0;  // (the game files' copies are gone after this call)
         PREP_PUT(prep_progs, ck, p);  // (failed ones too: the game then skips them as it would its own)
