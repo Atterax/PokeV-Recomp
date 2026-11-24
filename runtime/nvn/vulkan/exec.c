@@ -856,7 +856,7 @@ static bool chunk_held(int i) { for (int k = 0; k < NCTX; k++) if (active_t[k] =
 // used them finished; mv_unpin: they now wait for the next submission. mv_lost: no memory for another chunk
 // (vk_transient) took the pin away, so that frame keeps the camera's motion. (ring_mu: shadow workers capture too)
 static uint64_t mv_pin;
-static bool mv_lost;
+static _Atomic bool mv_lost;
 static void mv_unpin(void) {
     pthread_mutex_lock(&ring_mu);
     if (mv_pin) {
@@ -955,7 +955,7 @@ VkSpan vk_transient(uint64_t size, uint64_t align) {
     if (pick < 0) pick = new_chunk(size > CHUNK_SIZE ? size : CHUNK_SIZE);
     if (pick < 0) {  // no memory for another chunk (a GTX 1060 with 6 GB: issue #45): wait for the work already submitted,
         // which frees the chunks only it used, and take one of those (the recording in progress keeps its own)
-        if (mv_pin) mv_pin = 0, mv_lost = true;
+        if (mv_pin) mv_pin = 0, atomic_store_explicit(&mv_lost, true, memory_order_relaxed);
         vk_wait_seq(submit_seq);
         done = vk_completed_seq();
         for (int i = 0; i < nchunks; i++)
@@ -11757,9 +11757,14 @@ typedef struct { uint64_t key, size, frame[2]; uint32_t mask, len[2][18], cap[2]
 static MvCbuf mo_cb[2048];
 
 static bool objmv_on(void) {
-    static int on = -1;
-    if (on < 0) { const char *e = ENV("LARECOMP_OBJMV"); on = !e || atoi(e) != 0; }
-    return on && g_settings.taa == TAA_DLAA && vk_dlaa_available();
+    static _Atomic int on = -1;
+    int v = atomic_load_explicit(&on, memory_order_relaxed);
+    if (v < 0) {
+        const char *e = ENV("LARECOMP_OBJMV");
+        v = !e || atoi(e) != 0;
+        atomic_store_explicit(&on, v, memory_order_relaxed);
+    }
+    return v != 0 && g_settings.taa == TAA_DLAA && vk_dlaa_available();
 }
 
 // An entry not drawn in the last 2 frames is taken for a new mesh (without that the table fills up after travelling
@@ -11792,11 +11797,12 @@ static void objmv_capture(Prog *pr, Pipe *pp, uint32_t streams, const VkDescript
     pthread_mutex_lock(&mo_mu);
     if (mo.frame != f) {
         mv_unpin(), mo.n = 0;  // (last frame's draws, if never drawn again)
-        mo.frame = f, mo.seq = submit_seq, mv_lost = false;
+        mo.frame = f, mo.seq = submit_seq;
+        atomic_store_explicit(&mv_lost, false, memory_order_relaxed);
         mo.lo = ~0ull, mo.hi = 0;
         mo.captured = mo.no_prev = 0;
     }
-    if (mv_lost) goto out;
+    if (atomic_load_explicit(&mv_lost, memory_order_relaxed)) goto out;
     uint64_t off = ss.vo[0];
     if (off < mo.lo) mo.lo = off;
     if (off + v0.size > mo.hi) mo.hi = off + v0.size;
@@ -12213,6 +12219,7 @@ static void objmv_check(TexBackend *sb, TexBackend *mvb, uint32_t w, uint32_t h,
         vk_full_barrier(cb);
         rec_CmdCopyImageToBuffer(cb, img[i]->image, VK_IMAGE_LAYOUT_GENERAL, rb.buf, 1, &c);
         renderer_flush();
+        mkdir("build", 0755);
         char path[96];
         snprintf(path, sizeof path, "build/objmv_chk%d_%s.bin", k, nm[i]);
         FILE *fo = fopen(path, "wb");
