@@ -669,6 +669,11 @@ static void create_device(void) {
     VkPhysicalDeviceVertexInputDynamicStateFeaturesEXT have_vids = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_INPUT_DYNAMIC_STATE_FEATURES_EXT};
     if (vids_ext) have_vids.pNext = have.pNext, have.pNext = &have_vids;
+#ifdef VK_KHR_maintenance7
+    bool m7_ext = has_ext(ep, ne, VK_KHR_MAINTENANCE_7_EXTENSION_NAME);
+    VkPhysicalDeviceMaintenance7FeaturesKHR have_m7 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_7_FEATURES_KHR};
+    if (m7_ext) have_m7.pNext = have.pNext, have.pNext = &have_m7;
+#endif
 #ifdef VK_EXT_graphics_pipeline_library
     VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT have_gpl = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT};
@@ -835,6 +840,18 @@ static void create_device(void) {
     VkPhysicalDeviceVertexInputDynamicStateFeaturesEXT en_vids = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_INPUT_DYNAMIC_STATE_FEATURES_EXT, .vertexInputDynamicState = VK_TRUE};
     if (g_vk.vids) en_vids.pNext = f.pNext, f.pNext = &en_vids;
+#ifdef VK_KHR_maintenance7
+    // (the shadow workers' secondaries go into a pass that has inline draws too: no pass restart around each run -
+    // a full barrier and the targets stored and loaded again each time, 6 ms of GPU time a frame in a town.
+    // LARECOMP_VK_MAINT7=0: not taken)
+    VkPhysicalDeviceMaintenance7FeaturesKHR en_m7 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_7_FEATURES_KHR,
+                                                     .maintenance7 = VK_TRUE};
+    g_vk.maint7 = m7_ext && have_m7.maintenance7 && !(ENV("LARECOMP_VK_MAINT7") && !atoi(ENV("LARECOMP_VK_MAINT7")));
+    if (g_vk.maint7) {
+        en_m7.pNext = f.pNext, f.pNext = &en_m7;
+        ext[n_ext++] = VK_KHR_MAINTENANCE_7_EXTENSION_NAME;
+    }
+#endif
 #ifdef VK_EXT_graphics_pipeline_library
     VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT en_gpl = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT, .graphicsPipelineLibrary = VK_TRUE};

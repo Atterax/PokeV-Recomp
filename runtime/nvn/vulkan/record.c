@@ -44,6 +44,7 @@
 #include "record.h"
 
 #include <pthread.h>
+#include <sched.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
@@ -127,9 +128,24 @@ static void wait_room(uint64_t need) {
     st_t.full_ns += NOW() - t0;
 }
 
+// The ring has one writer, T - except while exec.c's shadow workers translate runs asynchronously (exec.c sw_async_*):
+// then T keeps translating, and a worker's calls for buffers other than its own secondary (the submission's upload
+// buffer: texture uploads) are queued too. rec_queue_shared(true) from T before the workers start, false once they are
+// all done; meanwhile every packet is written between push and commit under q_mx (a spin lock: packets take ~50 ns).
+static _Atomic int q_mx;
+static bool q_shared;
+void rec_queue_shared(bool on_) { q_shared = on_; }
+static inline void q_lock(void) {
+    if (!q_shared) return;
+    while (atomic_exchange_explicit(&q_mx, 1, memory_order_acquire))
+        while (atomic_load_explicit(&q_mx, memory_order_relaxed)) __builtin_ia32_pause();
+}
+static inline void q_unlock(void) { if (q_shared) atomic_store_explicit(&q_mx, 0, memory_order_release); }
+
 // T: a packet for fn with `args` bytes of arguments (+ `extra` bytes of arrays after them, each caller aligns its
 // own); returns the arguments' place. Committed with commit() once filled.
 static void *push(PktFn fn, size_t args, size_t extra) {
+    q_lock();
     uint64_t need = (sizeof(PktHdr) + ((args + PKT_ALIGN - 1) & ~(size_t)(PKT_ALIGN - 1)) + extra + PKT_ALIGN - 1) & ~(uint64_t)(PKT_ALIGN - 1);
     if (need > ring_cap / 4) FATAL("[vk] recorder: a packet of %llu bytes does not fit the ring\n", (unsigned long long)need);
     uint64_t at = wpos & (ring_cap - 1);
@@ -153,6 +169,7 @@ static void *push(PktFn fn, size_t args, size_t extra) {
 }
 static void commit(void) {
     if (wpos - published >= PUBLISH_EVERY) publish();
+    q_unlock();
 }
 // (the arrays of a packet: after its arguments, 16-aligned)
 #define AL16(n) (((n) + 15) & ~(size_t)15)
@@ -166,6 +183,30 @@ static void *run(void *arg) {
     uint64_t t = 0;
     for (;;) {
         uint64_t h = atomic_load_explicit(&head, memory_order_acquire);
+        if (h == t) {
+            // A short spin before sleeping: the translating thread publishes every 4 KB of packets, ~20 us apart in a
+            // busy frame, and records faster than this thread drains - so it slept between nearly every two, and each
+            // publish then woke it through the mutex and condition variable (33 000 a second in a Scarlet / Violet
+            // town at World detail 4x: 5.7 % of the render thread in publish). LARECOMP_VK_RECORDER_SPIN_US (default
+            // 150; 0: sleep at once, as before).
+            static int64_t spin_ns = -1;
+            if (spin_ns < 0) {
+                const char *e = getenv("LARECOMP_VK_RECORDER_SPIN_US");
+                spin_ns = (e ? atoll(e) : 150) * 1000;
+                if (spin_ns < 0) spin_ns = 0;
+            }
+            if (spin_ns) {
+                uint64_t s0 = NOW();
+                for (int k = 0; (h = atomic_load_explicit(&head, memory_order_acquire)) == t; k++) {
+#if defined(__x86_64__) || defined(_M_X64)
+                    __builtin_ia32_pause();
+#elif defined(__aarch64__)
+                    __asm__ volatile("yield");
+#endif
+                    if ((k & 63) == 63 && NOW() - s0 >= (uint64_t)spin_ns) break;
+                }
+            }
+        }
         if (h == t) {
             pthread_mutex_lock(&mu);
             atomic_store_explicit(&asleep, 1, memory_order_seq_cst);
@@ -353,6 +394,19 @@ typedef struct {
 } Pools;
 static Pools pools[VK_SUBS];
 static int set_batch = -1, set_recycle = -1;
+// A shadow worker (exec.c sw_*): the calls for its own secondary command buffer are made at once on its thread (the
+// recorder never sees that buffer), and its sets come from pools of its own per slot - allocated, written and bound
+// there, in that order. Calls for other command buffers (the submission's upload buffer) still go through the ring.
+#define SW_WORKERS 8
+static Pools wpools[SW_WORKERS][VK_SUBS];
+static __thread VkCommandBuffer rec_wcb;
+static __thread int rec_wid = -1;
+#define DIRECT(cb) (on <= 0 || (rec_wcb && (cb) == rec_wcb))
+// (commands a secondary inside a render pass can't hold: never asked of a worker's own buffer - logged if they are)
+#define SW_NOT_HERE(cb, name) do { if (rec_wcb && (cb) == rec_wcb) { static int n_; \
+    if (n_++ < 5) fprintf(stderr, "[sw] %s on a shadow worker's secondary\n", name); } } while (0)
+void rec_worker_enter(int w, VkCommandBuffer cb) { rec_wid = w; rec_wcb = cb; }
+void rec_worker_leave(void) { rec_wid = -1; rec_wcb = VK_NULL_HANDLE; }
 
 static bool alloc_sets(Pools *s, VkDescriptorSetLayout layout, uint32_t count, VkDescriptorSet *out) {
     VkDescriptorSetLayout ls[SET_BATCH];
@@ -474,6 +528,7 @@ static void alloc_set_run(const void *p) {
     rset[a->index & (RSETS - 1)] = pools_alloc(&pools[a->slot], a->layout);
 }
 VkDescriptorSet rec_alloc_set(int slot, VkDescriptorSetLayout layout) {
+    if (rec_wid >= 0) return pools_alloc(&wpools[rec_wid][slot], layout);
     if (on <= 0) return pools_alloc(&pools[slot], layout);
     ENQ_T0();
     uint32_t i = rset_next++;
@@ -486,6 +541,8 @@ VkDescriptorSet rec_alloc_set(int slot, VkDescriptorSetLayout layout) {
 
 static void reset_pools_run(const void *p) { pools_reset(&pools[*(const uint32_t *)p]); }
 void rec_reset_pools(int slot) {
+    for (int w = 0; w < SW_WORKERS; w++)  // (the shadow workers': idle now - the translating thread asks between runs)
+        if (wpools[w][slot].npools) pools_reset(&wpools[w][slot]);
     if (on <= 0) { pools_reset(&pools[slot]); return; }
     ENQ_T0();
     *(uint32_t *)push(reset_pools_run, sizeof(uint32_t), 0) = (uint32_t)slot;
@@ -515,7 +572,7 @@ static void update_sets_run(const void *p) {
     vkUpdateDescriptorSets(g_vk.dev, a->n, w, 0, NULL);
 }
 void rec_UpdateDescriptorSets(uint32_t n, const VkWriteDescriptorSet *w) {
-    if (on <= 0) { vkUpdateDescriptorSets(g_vk.dev, n, w, 0, NULL); return; }
+    if (on <= 0 || rec_wid >= 0) { vkUpdateDescriptorSets(g_vk.dev, n, w, 0, NULL); return; }
     ENQ_T0();
     UpdateArgs *a = push(update_sets_run, sizeof *a, AL16(n * sizeof *w) + n * sizeof(WriteInfo));
     a->n = n;
@@ -592,7 +649,8 @@ void rec_QueueSubmit2(const VkSubmitInfo2 *si, uint64_t seq) {
     if (on <= 0) { submit_run(&a); return; }
     ENQ_T0();
     *(SubmitArgs *)push(submit_run, sizeof a, 0) = a;
-    publish();  // (whoever waits for the submission must not wait for the next batch)
+    publish();
+    q_unlock();  // (whoever waits for the submission must not wait for the next batch)
     ENQ_END();
 }
 
@@ -641,6 +699,7 @@ void rec_QueuePresentKHR(VkSemaphore wait, VkSwapchainKHR swapchain, uint32_t im
     ENQ_T0();
     *(PresentArgs *)push(present_run, sizeof a, 0) = a;
     publish();
+    q_unlock();
     ENQ_END();
 }
 bool rec_present_recreate(void) { return atomic_exchange_explicit(&present_recreate, 0, memory_order_acq_rel) != 0; }
@@ -648,13 +707,14 @@ bool rec_present_recreate(void) { return atomic_exchange_explicit(&present_recre
 // ================================================================== commands
 // Scalar arguments: a struct of the command buffer and the values, made by a macro from the parameter list.
 #define CMD_ARGS(name, ...) typedef struct { VkCommandBuffer cb; __VA_ARGS__ } name##Args;
-#define CMD_QUEUE(name, ...) \
-    do { if (on <= 0) { vk##name(__VA_ARGS__); return; } ENQ_T0(); name##Args *a_ = push(name##_run, sizeof *a_, 0); \
-         *a_ = (name##Args){__VA_ARGS__}; commit(); ENQ_END(); } while (0)
+#define CMD_QUEUE(name, cb_, ...) \
+    do { if (DIRECT(cb_)) { vk##name(cb_, __VA_ARGS__); return; } ENQ_T0(); name##Args *a_ = push(name##_run, sizeof *a_, 0); \
+         *a_ = (name##Args){cb_, __VA_ARGS__}; commit(); ENQ_END(); } while (0)
 
 CMD_ARGS(CmdDispatch, uint32_t x, y, z;)
 static void CmdDispatch_run(const void *p) { const CmdDispatchArgs *a = p; vkCmdDispatch(a->cb, a->x, a->y, a->z); }
-void rec_CmdDispatch(VkCommandBuffer cb, uint32_t x, uint32_t y, uint32_t z) { CMD_QUEUE(CmdDispatch, cb, x, y, z); }
+void rec_CmdDispatch(VkCommandBuffer cb, uint32_t x, uint32_t y, uint32_t z) {
+    SW_NOT_HERE(cb, "rec_CmdDispatch"); CMD_QUEUE(CmdDispatch, cb, x, y, z); }
 
 CMD_ARGS(CmdBindIndexBuffer, VkBuffer buf; VkDeviceSize off; VkIndexType type;)
 static void CmdBindIndexBuffer_run(const void *p) { const CmdBindIndexBufferArgs *a = p; vkCmdBindIndexBuffer(a->cb, a->buf, a->off, a->type); }
@@ -663,7 +723,8 @@ void rec_CmdBindIndexBuffer(VkCommandBuffer cb, VkBuffer buf, VkDeviceSize off, 
 CMD_ARGS(CmdEndRendering, char pad_;)
 static void CmdEndRendering_run(const void *p) { vkCmdEndRendering(((const CmdEndRenderingArgs *)p)->cb); }
 void rec_CmdEndRendering(VkCommandBuffer cb) {
-    if (on <= 0) { vkCmdEndRendering(cb); return; }
+    SW_NOT_HERE(cb, "rec_CmdEndRendering");
+    if (DIRECT(cb)) { vkCmdEndRendering(cb); return; }
     ENQ_T0();
     ((CmdEndRenderingArgs *)push(CmdEndRendering_run, sizeof(CmdEndRenderingArgs), 0))->cb = cb;
     commit();
@@ -712,7 +773,8 @@ void rec_CmdSetStencilOp(VkCommandBuffer cb, VkStencilFaceFlags face, VkStencilO
 
 CMD_ARGS(CmdResetQueryPool, VkQueryPool pool; uint32_t first, n;)
 static void CmdResetQueryPool_run(const void *p) { const CmdResetQueryPoolArgs *a = p; vkCmdResetQueryPool(a->cb, a->pool, a->first, a->n); }
-void rec_CmdResetQueryPool(VkCommandBuffer cb, VkQueryPool pool, uint32_t first, uint32_t n) { CMD_QUEUE(CmdResetQueryPool, cb, pool, first, n); }
+void rec_CmdResetQueryPool(VkCommandBuffer cb, VkQueryPool pool, uint32_t first, uint32_t n) {
+    SW_NOT_HERE(cb, "rec_CmdResetQueryPool"); CMD_QUEUE(CmdResetQueryPool, cb, pool, first, n); }
 
 CMD_ARGS(CmdWriteTimestamp2, VkPipelineStageFlags2 stage; VkQueryPool pool; uint32_t query;)
 static void CmdWriteTimestamp2_run(const void *p) { const CmdWriteTimestamp2Args *a = p; vkCmdWriteTimestamp2(a->cb, a->stage, a->pool, a->query); }
@@ -723,7 +785,7 @@ void rec_CmdWriteTimestamp2(VkCommandBuffer cb, VkPipelineStageFlags2 stage, VkQ
 CMD_ARGS(CmdSetBlendConstants, float c[4];)
 static void CmdSetBlendConstants_run(const void *p) { const CmdSetBlendConstantsArgs *a = p; vkCmdSetBlendConstants(a->cb, a->c); }
 void rec_CmdSetBlendConstants(VkCommandBuffer cb, const float c[4]) {
-    if (on <= 0) { vkCmdSetBlendConstants(cb, c); return; }
+    if (DIRECT(cb)) { vkCmdSetBlendConstants(cb, c); return; }
     ENQ_T0();
     CmdSetBlendConstantsArgs *a = push(CmdSetBlendConstants_run, sizeof *a, 0);
     a->cb = cb;
@@ -736,7 +798,7 @@ void rec_CmdSetBlendConstants(VkCommandBuffer cb, const float c[4]) {
 // A bind through the resolver (exec.c's Pipe): with WAIT_PIPES a pipeline still building is waited for here, so the
 // translating thread never skips a draw for it; one whose build failed binds nothing, and the draws until the next
 // graphics bind are dropped (as the translating thread drops them when it skips).
-static bool unbound;  // (R; T when the recorder is off: the same thread then)
+static __thread bool unbound;  // (R; T when the recorder is off: the same thread then; a shadow worker its own)
 CMD_ARGS(CmdBindPipeline, VkPipelineBindPoint bp; VkPipeline p; void *obj;)
 static void CmdBindPipeline_run(const void *p) {
     const CmdBindPipelineArgs *a = p;
@@ -755,7 +817,7 @@ static void CmdBindPipeline_run(const void *p) {
 }
 void rec_CmdBindPipeline(VkCommandBuffer cb, VkPipelineBindPoint bp, VkPipeline p) {
     CmdBindPipelineArgs a = {cb, bp, p, NULL};
-    if (on <= 0) { CmdBindPipeline_run(&a); return; }
+    if (DIRECT(cb)) { CmdBindPipeline_run(&a); return; }
     ENQ_T0();
     *(CmdBindPipelineArgs *)push(CmdBindPipeline_run, sizeof a, 0) = a;
     commit();
@@ -763,7 +825,7 @@ void rec_CmdBindPipeline(VkCommandBuffer cb, VkPipelineBindPoint bp, VkPipeline 
 }
 void rec_CmdBindPipelineObj(VkCommandBuffer cb, VkPipelineBindPoint bp, void *obj) {
     CmdBindPipelineArgs a = {cb, bp, VK_NULL_HANDLE, obj};
-    if (on <= 0) { CmdBindPipeline_run(&a); return; }
+    if (DIRECT(cb)) { CmdBindPipeline_run(&a); return; }
     ENQ_T0();
     *(CmdBindPipelineArgs *)push(CmdBindPipeline_run, sizeof a, 0) = a;
     commit();
@@ -782,7 +844,7 @@ static void CmdDraw_run(const void *p) {
 }
 void rec_CmdDraw(VkCommandBuffer cb, uint32_t count, uint32_t inst, uint32_t first, uint32_t first_inst) {
     CmdDrawArgs a = {cb, count, inst, first, first_inst};
-    if (on <= 0) { CmdDraw_run(&a); return; }
+    if (DIRECT(cb)) { CmdDraw_run(&a); return; }
     ENQ_T0();
     *(CmdDrawArgs *)push(CmdDraw_run, sizeof a, 0) = a;
     commit();
@@ -798,7 +860,7 @@ static void CmdDrawIndirect_run(const void *p) {
 }
 void rec_CmdDrawIndirect(VkCommandBuffer cb, VkBuffer buf, VkDeviceSize off, uint32_t n, uint32_t stride, bool indexed) {
     CmdDrawIndirectArgs a = {cb, buf, off, n, stride, indexed};
-    if (on <= 0) { CmdDrawIndirect_run(&a); return; }
+    if (DIRECT(cb)) { CmdDrawIndirect_run(&a); return; }
     ENQ_T0();
     *(CmdDrawIndirectArgs *)push(CmdDrawIndirect_run, sizeof a, 0) = a;
     commit();
@@ -811,7 +873,7 @@ static void CmdDrawIndexed_run(const void *p) {
 }
 void rec_CmdDrawIndexed(VkCommandBuffer cb, uint32_t count, uint32_t inst, uint32_t first, int32_t base, uint32_t first_inst) {
     CmdDrawIndexedArgs a = {cb, count, inst, first, base, first_inst};
-    if (on <= 0) { CmdDrawIndexed_run(&a); return; }
+    if (DIRECT(cb)) { CmdDrawIndexed_run(&a); return; }
     ENQ_T0();
     *(CmdDrawIndexedArgs *)push(CmdDrawIndexed_run, sizeof a, 0) = a;
     commit();
@@ -827,7 +889,7 @@ static void CmdBindVertexBuffers_run(const void *p) {
     vkCmdBindVertexBuffers(a->cb, a->first, a->n, b, o);
 }
 void rec_CmdBindVertexBuffers(VkCommandBuffer cb, uint32_t first, uint32_t n, const VkBuffer *bufs, const VkDeviceSize *offs) {
-    if (on <= 0) { vkCmdBindVertexBuffers(cb, first, n, bufs, offs); return; }
+    if (DIRECT(cb)) { vkCmdBindVertexBuffers(cb, first, n, bufs, offs); return; }
     ENQ_T0();
     CmdBindVertexBuffersArgs *a = push(CmdBindVertexBuffers_run, sizeof *a, AL16(n * sizeof *bufs) + n * sizeof *offs);
     *a = (CmdBindVertexBuffersArgs){cb, first, n};
@@ -848,7 +910,7 @@ static void CmdBindDescriptorSets_run(const void *p) {
 }
 void rec_CmdBindDescriptorSets(VkCommandBuffer cb, VkPipelineBindPoint bp, VkPipelineLayout layout, uint32_t first, uint32_t n,
                                const VkDescriptorSet *sets, uint32_t ndyn, const uint32_t *dyn) {
-    if (on <= 0) { vkCmdBindDescriptorSets(cb, bp, layout, first, n, sets, ndyn, dyn); return; }
+    if (DIRECT(cb)) { vkCmdBindDescriptorSets(cb, bp, layout, first, n, sets, ndyn, dyn); return; }
     ENQ_T0();
     CmdBindDescriptorSetsArgs *a = push(CmdBindDescriptorSets_run, sizeof *a, AL16(n * sizeof *sets) + ndyn * sizeof *dyn);
     *a = (CmdBindDescriptorSetsArgs){cb, bp, layout, first, n, ndyn};
@@ -865,7 +927,7 @@ static void CmdPushConstants_run(const void *p) {
     vkCmdPushConstants(a->cb, a->layout, a->stages, a->off, a->size, after(a, sizeof *a));
 }
 void rec_CmdPushConstants(VkCommandBuffer cb, VkPipelineLayout layout, VkShaderStageFlags stages, uint32_t off, uint32_t size, const void *data) {
-    if (on <= 0) { vkCmdPushConstants(cb, layout, stages, off, size, data); return; }
+    if (DIRECT(cb)) { vkCmdPushConstants(cb, layout, stages, off, size, data); return; }
     ENQ_T0();
     CmdPushConstantsArgs *a = push(CmdPushConstants_run, sizeof *a, size);
     *a = (CmdPushConstantsArgs){cb, layout, stages, off, size};
@@ -882,7 +944,8 @@ static void CmdExecuteCommands_run(const void *p) {
     vkCmdExecuteCommands(a->cb, a->n, after(a, sizeof *a));
 }
 void rec_CmdExecuteCommands(VkCommandBuffer cb, uint32_t n, const VkCommandBuffer *cbs) {
-    if (on <= 0) { vkCmdExecuteCommands(cb, n, cbs); return; }
+    SW_NOT_HERE(cb, "rec_CmdExecuteCommands");
+    if (DIRECT(cb)) { vkCmdExecuteCommands(cb, n, cbs); return; }
     ENQ_T0();
     CmdExecuteCommandsArgs *a = push(CmdExecuteCommands_run, sizeof *a, n * sizeof *cbs);
     *a = (CmdExecuteCommandsArgs){cb, n};
@@ -891,10 +954,34 @@ void rec_CmdExecuteCommands(VkCommandBuffer cb, uint32_t n, const VkCommandBuffe
     ENQ_END();
 }
 
+// (exec.c sw_async: a run's secondaries, recorded by the shadow workers while T went on) executed once *left is 0 -
+// the workers fill cbs[0..n) (NULL: a part without draws) before they count down
+typedef struct { VkCommandBuffer cb; _Atomic int *left; const VkCommandBuffer *cbs; uint32_t n; _Atomic int *consumed; } ExecWaitArgs;
+static void exec_wait_run(const void *p) {
+    const ExecWaitArgs *a = p;
+    for (uint32_t k = 0; atomic_load_explicit(a->left, memory_order_acquire) > 0; k++) {
+        if (k < 4000) __builtin_ia32_pause();
+        else sched_yield();
+    }
+    VkCommandBuffer v[16];
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < a->n && n < 16; i++) if (a->cbs[i]) v[n++] = a->cbs[i];
+    if (n) vkCmdExecuteCommands(a->cb, n, v);
+    atomic_store_explicit(a->consumed, 1, memory_order_release);
+}
+bool rec_exec_wait_ok(void) { return on > 0; }  // (the recorder runs: T needn't wait for the workers itself)
+void rec_CmdExecuteCommandsWait(VkCommandBuffer cb, _Atomic int *left, const VkCommandBuffer *cbs, uint32_t n, _Atomic int *consumed) {
+    ENQ_T0();
+    *(ExecWaitArgs *)push(exec_wait_run, sizeof(ExecWaitArgs), 0) = (ExecWaitArgs){cb, left, cbs, n, consumed};
+    publish();  // (the recorder may start waiting at once)
+    q_unlock();
+    ENQ_END();
+}
+
 CMD_ARGS(CmdSetViewport, uint32_t first, n;)  // then VkViewport[n]
 static void CmdSetViewport_run(const void *p) { const CmdSetViewportArgs *a = p; vkCmdSetViewport(a->cb, a->first, a->n, after(a, sizeof *a)); }
 void rec_CmdSetViewport(VkCommandBuffer cb, uint32_t first, uint32_t n, const VkViewport *v) {
-    if (on <= 0) { vkCmdSetViewport(cb, first, n, v); return; }
+    if (DIRECT(cb)) { vkCmdSetViewport(cb, first, n, v); return; }
     ENQ_T0();
     CmdSetViewportArgs *a = push(CmdSetViewport_run, sizeof *a, n * sizeof *v);
     *a = (CmdSetViewportArgs){cb, first, n};
@@ -905,7 +992,7 @@ void rec_CmdSetViewport(VkCommandBuffer cb, uint32_t first, uint32_t n, const Vk
 CMD_ARGS(CmdSetScissor, uint32_t first, n;)  // then VkRect2D[n]
 static void CmdSetScissor_run(const void *p) { const CmdSetScissorArgs *a = p; vkCmdSetScissor(a->cb, a->first, a->n, after(a, sizeof *a)); }
 void rec_CmdSetScissor(VkCommandBuffer cb, uint32_t first, uint32_t n, const VkRect2D *r) {
-    if (on <= 0) { vkCmdSetScissor(cb, first, n, r); return; }
+    if (DIRECT(cb)) { vkCmdSetScissor(cb, first, n, r); return; }
     ENQ_T0();
     CmdSetScissorArgs *a = push(CmdSetScissor_run, sizeof *a, n * sizeof *r);
     *a = (CmdSetScissorArgs){cb, first, n};
@@ -924,7 +1011,7 @@ static void CmdSetVertexInputEXT_run(const void *p) {
 }
 void rec_CmdSetVertexInputEXT(VkCommandBuffer cb, uint32_t nb, const VkVertexInputBindingDescription2EXT *b, uint32_t na,
                               const VkVertexInputAttributeDescription2EXT *v) {
-    if (on <= 0) { g_vk.set_vertex_input(cb, nb, b, na, v); return; }
+    if (DIRECT(cb)) { g_vk.set_vertex_input(cb, nb, b, na, v); return; }
     ENQ_T0();
     CmdSetVertexInputEXTArgs *a = push(CmdSetVertexInputEXT_run, sizeof *a, AL16(nb * sizeof *b) + na * sizeof *v);
     *a = (CmdSetVertexInputEXTArgs){cb, nb, na};
@@ -942,7 +1029,7 @@ static void CmdClearAttachments_run(const void *p) {
     vkCmdClearAttachments(a->cb, a->na, at, a->nr, after(at, a->na * sizeof *at));
 }
 void rec_CmdClearAttachments(VkCommandBuffer cb, uint32_t na, const VkClearAttachment *at, uint32_t nr, const VkClearRect *r) {
-    if (on <= 0) { vkCmdClearAttachments(cb, na, at, nr, r); return; }
+    if (DIRECT(cb)) { vkCmdClearAttachments(cb, na, at, nr, r); return; }
     ENQ_T0();
     CmdClearAttachmentsArgs *a = push(CmdClearAttachments_run, sizeof *a, AL16(na * sizeof *at) + nr * sizeof *r);
     *a = (CmdClearAttachmentsArgs){cb, na, nr};
@@ -1003,43 +1090,51 @@ static void xfer(PktFn fn, const XferArgs *x, const void *regions, size_t size) 
     ENQ_END();
 }
 void rec_CmdCopyBuffer(VkCommandBuffer cb, VkBuffer src, VkBuffer dst, uint32_t n, const VkBufferCopy *r) {
-    if (on <= 0) { vkCmdCopyBuffer(cb, src, dst, n, r); return; }
+    SW_NOT_HERE(cb, "rec_CmdCopyBuffer");
+    if (DIRECT(cb)) { vkCmdCopyBuffer(cb, src, dst, n, r); return; }
     XferArgs x = {.cb = cb, .h1 = (uint64_t)src, .h2 = (uint64_t)dst, .n = n};
     xfer(copy_buffer_run, &x, r, sizeof *r);
 }
 void rec_CmdCopyImage(VkCommandBuffer cb, VkImage src, VkImageLayout sl, VkImage dst, VkImageLayout dl, uint32_t n, const VkImageCopy *r) {
-    if (on <= 0) { vkCmdCopyImage(cb, src, sl, dst, dl, n, r); return; }
+    SW_NOT_HERE(cb, "rec_CmdCopyImage");
+    if (DIRECT(cb)) { vkCmdCopyImage(cb, src, sl, dst, dl, n, r); return; }
     XferArgs x = {.cb = cb, .h1 = (uint64_t)src, .h2 = (uint64_t)dst, .l1 = sl, .l2 = dl, .n = n};
     xfer(copy_image_run, &x, r, sizeof *r);
 }
 void rec_CmdBlitImage(VkCommandBuffer cb, VkImage src, VkImageLayout sl, VkImage dst, VkImageLayout dl, uint32_t n, const VkImageBlit *r, VkFilter f) {
-    if (on <= 0) { vkCmdBlitImage(cb, src, sl, dst, dl, n, r, f); return; }
+    SW_NOT_HERE(cb, "rec_CmdBlitImage");
+    if (DIRECT(cb)) { vkCmdBlitImage(cb, src, sl, dst, dl, n, r, f); return; }
     XferArgs x = {.cb = cb, .h1 = (uint64_t)src, .h2 = (uint64_t)dst, .l1 = sl, .l2 = dl, .n = n, .filter = f};
     xfer(blit_image_run, &x, r, sizeof *r);
 }
 void rec_CmdResolveImage(VkCommandBuffer cb, VkImage src, VkImageLayout sl, VkImage dst, VkImageLayout dl, uint32_t n, const VkImageResolve *r) {
-    if (on <= 0) { vkCmdResolveImage(cb, src, sl, dst, dl, n, r); return; }
+    SW_NOT_HERE(cb, "rec_CmdResolveImage");
+    if (DIRECT(cb)) { vkCmdResolveImage(cb, src, sl, dst, dl, n, r); return; }
     XferArgs x = {.cb = cb, .h1 = (uint64_t)src, .h2 = (uint64_t)dst, .l1 = sl, .l2 = dl, .n = n};
     xfer(resolve_image_run, &x, r, sizeof *r);
 }
 void rec_CmdCopyBufferToImage(VkCommandBuffer cb, VkBuffer src, VkImage dst, VkImageLayout dl, uint32_t n, const VkBufferImageCopy *r) {
-    if (on <= 0) { vkCmdCopyBufferToImage(cb, src, dst, dl, n, r); return; }
+    SW_NOT_HERE(cb, "rec_CmdCopyBufferToImage");
+    if (DIRECT(cb)) { vkCmdCopyBufferToImage(cb, src, dst, dl, n, r); return; }
     XferArgs x = {.cb = cb, .h1 = (uint64_t)src, .h2 = (uint64_t)dst, .l2 = dl, .n = n};
     xfer(buffer_to_image_run, &x, r, sizeof *r);
 }
 void rec_CmdCopyImageToBuffer(VkCommandBuffer cb, VkImage src, VkImageLayout sl, VkBuffer dst, uint32_t n, const VkBufferImageCopy *r) {
-    if (on <= 0) { vkCmdCopyImageToBuffer(cb, src, sl, dst, n, r); return; }
+    SW_NOT_HERE(cb, "rec_CmdCopyImageToBuffer");
+    if (DIRECT(cb)) { vkCmdCopyImageToBuffer(cb, src, sl, dst, n, r); return; }
     XferArgs x = {.cb = cb, .h1 = (uint64_t)src, .h2 = (uint64_t)dst, .l1 = sl, .n = n};
     xfer(image_to_buffer_run, &x, r, sizeof *r);
 }
 void rec_CmdClearColorImage(VkCommandBuffer cb, VkImage img, VkImageLayout l, const VkClearColorValue *c, uint32_t n, const VkImageSubresourceRange *rg) {
-    if (on <= 0) { vkCmdClearColorImage(cb, img, l, c, n, rg); return; }
+    SW_NOT_HERE(cb, "rec_CmdClearColorImage");
+    if (DIRECT(cb)) { vkCmdClearColorImage(cb, img, l, c, n, rg); return; }
     XferArgs x = {.cb = cb, .h1 = (uint64_t)img, .l1 = l, .n = n, .clear.color = *c};
     xfer(clear_color_run, &x, rg, sizeof *rg);
 }
 void rec_CmdClearDepthStencilImage(VkCommandBuffer cb, VkImage img, VkImageLayout l, const VkClearDepthStencilValue *c, uint32_t n,
                                    const VkImageSubresourceRange *rg) {
-    if (on <= 0) { vkCmdClearDepthStencilImage(cb, img, l, c, n, rg); return; }
+    SW_NOT_HERE(cb, "rec_CmdClearDepthStencilImage");
+    if (DIRECT(cb)) { vkCmdClearDepthStencilImage(cb, img, l, c, n, rg); return; }
     XferArgs x = {.cb = cb, .h1 = (uint64_t)img, .l1 = l, .n = n, .clear.ds = *c};
     xfer(clear_ds_run, &x, rg, sizeof *rg);
 }
@@ -1058,7 +1153,8 @@ static void CmdPipelineBarrier2_run(const void *p) {
     vkCmdPipelineBarrier2(a->cb, &di);
 }
 void rec_CmdPipelineBarrier2(VkCommandBuffer cb, const VkDependencyInfo *di) {
-    if (on <= 0) { vkCmdPipelineBarrier2(cb, di); return; }
+    SW_NOT_HERE(cb, "rec_CmdPipelineBarrier2");
+    if (DIRECT(cb)) { vkCmdPipelineBarrier2(cb, di); return; }
     if (di->pNext) FATAL("[vk] recorder: a chained dependency\n");
     for (uint32_t i = 0; i < di->memoryBarrierCount; i++) if (di->pMemoryBarriers[i].pNext) FATAL("[vk] recorder: a chained barrier\n");
     for (uint32_t i = 0; i < di->bufferMemoryBarrierCount; i++) if (di->pBufferMemoryBarriers[i].pNext) FATAL("[vk] recorder: a chained barrier\n");
@@ -1090,7 +1186,8 @@ static void CmdBeginRendering_run(const void *p) {
     vkCmdBeginRendering(a->cb, &ri);
 }
 void rec_CmdBeginRendering(VkCommandBuffer cb, const VkRenderingInfo *ri) {
-    if (on <= 0) { vkCmdBeginRendering(cb, ri); return; }
+    SW_NOT_HERE(cb, "rec_CmdBeginRendering");
+    if (DIRECT(cb)) { vkCmdBeginRendering(cb, ri); return; }
     if (ri->pNext) FATAL("[vk] recorder: a chained rendering info\n");
     for (uint32_t i = 0; i < ri->colorAttachmentCount; i++) if (ri->pColorAttachments[i].pNext) FATAL("[vk] recorder: a chained attachment\n");
     if ((ri->pDepthAttachment && ri->pDepthAttachment->pNext) || (ri->pStencilAttachment && ri->pStencilAttachment->pNext))

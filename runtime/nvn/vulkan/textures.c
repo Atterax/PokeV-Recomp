@@ -570,6 +570,7 @@ static TexBackend *tex_backend(NvnTexture *t) {
     }
     vk_collect_dead();
     b = calloc(1, sizeof *b);
+    vk_tex_vgen_bump(b);  // (a backend at a freed one's address: not its memo entries)
     b->scalable = tex_scalable(t);
     b->shadow_k = tex_shadow_scale(t);
     create_image(t, b);
@@ -1195,6 +1196,19 @@ TexBackend *vk_tex(NvnTexture *t, bool for_render) {
     return b;
 }
 
+// vk_tex(t, false) would change nothing now: no pending host data, and no upload check due this frame (upload_texture's
+// early returns). Read without the lock by the shadow workers (exec.c texture_info): a stale field only sends the
+// caller the long way.
+bool vk_tex_quiet(NvnTexture *t) {
+    TexBackend *b = t->backend;
+    if (!b || b->pending_rgba) return false;
+    if (b->scalable && (b->ax != g_al_x || b->ay != g_al_y)) return false;  // (tex_backend reallocates it)
+    if (b->gpu_owned || !t->addr || t->target == 10) return true;
+    if (!b->uploaded) return false;
+    uint64_t frame = vk_frame_counter();
+    return b->checked_frame == frame || (!b->dynamic && !b->prefetched && ((frame + ((uintptr_t)b >> 6)) & 7));
+}
+
 // (render thread, in queue order: rqueue.c IT_PREFETCH, from nvnTexturePoolRegisterTexture) A texture the game just
 // registered, uploaded now instead of at its first draw: Pokémon Z-A registers a battle's ~2000 textures as it starts
 // loading it, ~5 s before the battle's first frame draws 870 of them (125 MB: a 135 ms frame), and meanwhile the
@@ -1289,9 +1303,12 @@ static ViewEnt view_tab[VIEW_TAB];
 
 // Views may still be referenced by submitted or pending work: destroyed once that has completed.
 void vk_views_forget(TexBackend *b) { views_forget(b); }
-uint32_t vk_view_gen;  // bumped whenever a cached view may be destroyed (exec.c's per-frame texture memo)
+uint32_t vk_view_gen;  // bumped whenever a cached view may be destroyed (exec.c's descriptor set reuse)
+static _Atomic uint64_t vk_vgen_next;
+void vk_tex_vgen_bump(TexBackend *b) { if (b) b->vgen = atomic_fetch_add_explicit(&vk_vgen_next, 1, memory_order_relaxed) + 1; }
 static void views_forget(TexBackend *b) {
     vk_view_gen++;
+    vk_tex_vgen_bump(b);
     for (int i = 0; i < VIEW_TAB; i++)
         if (view_tab[i].b == b) { defer((Dead){.view = view_tab[i].view}); view_tab[i].b = NULL; view_tab[i].view = VK_NULL_HANDLE; }
 }
@@ -1319,7 +1336,7 @@ VkImageView vk_image_view(TexBackend *b, VkImageViewType type, VkFormat fmt, uin
         return VK_NULL_HANDLE;
     }
     ViewEnt *e = &view_tab[slot];
-    if (e->b) { defer((Dead){.view = e->view}); vk_view_gen++; }  // evict (16 probes taken)
+    if (e->b) { defer((Dead){.view = e->view}); vk_view_gen++; vk_tex_vgen_bump(e->b); }  // evict (16 probes taken)
     *e = (ViewEnt){b, k1, k2, v};
     return v;
 }

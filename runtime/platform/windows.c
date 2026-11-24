@@ -695,7 +695,11 @@ static DWORD WINAPI sampler_main(void *arg) {
     FILE *f = fopen("build/samples.txt", "w");
     if (f) {
         for (uint32_t i = 0; i < SAMP_TAB; i++)
-            if (samp[i].n) fprintf(f, "%u %llx %u\n", samp[i].tid, (unsigned long long)samp[i].rip, samp[i].n);
+            if (samp[i].n) {  // (a game function's samples also name it: f_<guest address>, dispatch.c)
+                extern const char *rt_host_fn_name(uint64_t pc, uint64_t *offset);
+                const char *g = rt_host_fn_name(samp[i].rip, NULL);
+                fprintf(f, "%u %llx %u %s\n", samp[i].tid, (unsigned long long)samp[i].rip, samp[i].n, g ? g : "-");
+            }
         fclose(f);
     }
     HMODULE game = GetModuleHandleA("lasgame.dll"), exe = GetModuleHandleA(NULL);

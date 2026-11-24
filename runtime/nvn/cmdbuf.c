@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "nvn.h"
+#include "rqueue.h"
 
 #define JUMP_RESERVE (sizeof(CmdRec) + 8)
 
@@ -17,7 +18,7 @@ NVN(nvnCommandBufferInitialize) {
     SET_HOST(A(0), cb);
     RET(1);
 }
-NVN(nvnCommandBufferFinalize) { free(cb_of(A(0))); SET_HOST(A(0), 0); }
+NVN(nvnCommandBufferFinalize) { NvnCmdBuf *cb = cb_of(A(0)); if (cb) free(cb->lcall); free(cb); SET_HOST(A(0), 0); }
 NVN(nvnCommandBufferSetDebugLabel) { (void)c; static int seen_; if (!seen_++ && ENV("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnCommandBufferSetDebugLabel\n"); }
 
 static CmdRec *raw_rec(uint64_t at, uint32_t op, uint32_t size) {
@@ -161,11 +162,14 @@ NVN(nvnCommandBufferBeginRecording) {
     cb->recording = true;
     rec(c, cb, CMD_BARRIER, 0);  // makes sure memory exists; the list starts here
     cb->start = cb->mem + cb->used - sizeof(CmdRec);
+    cb->nlfence = cb->nlcall = 0;
+    cb->lmany = false;
 }
 NVN(nvnCommandBufferEndRecording) {
     NvnCmdBuf *cb = cb_of(A(0));
     rec(c, cb, CMD_END, 0);
     cb->recording = false;
+    rq_list_ended(cb->start, cb->lfence, cb->nlfence, cb->lcall, cb->nlcall, cb->lmany);
     RET(cb->start);
 }
 NVN(nvnCommandBufferIsRecording) { RET(cb_of(A(0))->recording); }
@@ -525,7 +529,11 @@ NVN(nvnCommandBufferUpdateUniformBuffer) { record_copy(c, CMD_UPDATE_UNIFORM_BUF
 NVN(nvnCommandBufferFenceSync) {
     // work executes at submit time, so the sync is satisfied once this list has run
     Snap s = snap(c);
-    record(c, CMD_FENCE_SYNC, 0, &s);
+    CmdRec *r = record(c, CMD_FENCE_SYNC, 0, &s);
+    NvnCmdBuf *cb = cb_of(s.x[0]);
+    if (!r->x[1]) {
+    } else if (cb->nlfence < 8) cb->lfence[cb->nlfence++] = r->x[1];  // (what the submission's walk took: rqueue.c)
+    else cb->lmany = true;
 }
 PLAIN(nvnCommandBufferWaitSync, CMD_WAIT_SYNC)
 PLAIN(nvnCommandBufferBarrier, CMD_BARRIER)
@@ -534,8 +542,22 @@ PLAIN(nvnCommandBufferWaitEvent, CMD_WAIT_EVENT)
 PLAIN(nvnCommandBufferReportCounter, CMD_REPORT_COUNTER)
 NVN(nvnCommandBufferReportValue) { (void)c; static int seen_; if (!seen_++ && ENV("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnCommandBufferReportValue\n"); }
 NVN(nvnCommandBufferResetCounter) { (void)c; static int seen_; if (!seen_++ && ENV("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnCommandBufferResetCounter\n"); }
-NVN(nvnCommandBufferCallCommands) { record_copy(c, CMD_CALL, 2, (uint32_t)A(1) * 8); }
-NVN(nvnCommandBufferCopyCommands) { record_copy(c, CMD_CALL, 2, (uint32_t)A(1) * 8); }
+static void call_rec(Cpu *c) {
+    NvnCmdBuf *cb = cb_of(A(0));
+    CmdRec *r = record_copy(c, CMD_CALL, 2, (uint32_t)A(1) * 8);
+    const uint64_t *h = (const uint64_t *)r->extra;
+    for (uint64_t i = 0; i < r->x[0]; i++) {
+        if (cb->nlcall == cb->lcall_cap) {
+            int nc = cb->lcall_cap ? cb->lcall_cap * 2 : 64;
+            uint64_t *p = realloc(cb->lcall, sizeof *p * (size_t)nc);
+            if (!p) { cb->lmany = true; break; }
+            cb->lcall = p, cb->lcall_cap = nc;
+        }
+        cb->lcall[cb->nlcall++] = h[i];
+    }
+}
+NVN(nvnCommandBufferCallCommands) { call_rec(c); }
+NVN(nvnCommandBufferCopyCommands) { call_rec(c); }
 NVN(nvnCommandBufferInsertDebugMarker) { (void)c; static int seen_; if (!seen_++ && ENV("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnCommandBufferInsertDebugMarker\n"); }
 NVN(nvnCommandBufferInsertDebugMarkerDynamic) { (void)c; static int seen_; if (!seen_++ && ENV("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnCommandBufferInsertDebugMarkerDynamic\n"); }
 NVN(nvnCommandBufferInsertDebugMarkerStatic) { (void)c; static int seen_; if (!seen_++ && ENV("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnCommandBufferInsertDebugMarkerStatic\n"); }
