@@ -107,6 +107,22 @@ def _sv_proj_aspect_s4(gen, a):
     return _sv_proj_aspect(gen, a, 4, 0xbd419264)   # ldr s4, [x19, #0x190]
 
 
+def _sv_lua_frame_time(gen, a):
+    # 0x7000b46da0: lua_pushnumber's first instruction, ldr x8, [x0, #0x10] (L->top; the game's Lua is 5.4). The
+    # scripts step by a frame time of their own, the global C075A638F130352C3.S44460EB93267F798, which they set to
+    # 1/30 when they load and never change: at 60 fps every script that integrates with it moved twice as fast in
+    # real time - the ride's jump (its velocity loses gravity * 1/30 a frame: 8.51 m/s at take-off, -0.633 a frame
+    # at 30 and at 60 fps alike, so at 60 the leap lasted 0.45 s instead of 0.9 and rose half as high). The natives
+    # push numbers into the scripts many times a frame, on the thread running them: rt_sv_lua_frame_time
+    # (runtime/hle/framepace.c) writes this frame's time into that global once a frame, from there.
+    # LARECOMP_SV_LUA_DT=0: left at 1/30.
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0xf9400808, hex(w)  # ldr x8, [x0, #0x10]
+    return ('{ extern void rt_sv_lua_frame_time(uint64_t L); rt_sv_lua_frame_time(c->x[0]); '
+            'c->x[8] = LD64(c->x[0] + 0x10); }'
+            f'  /* {a:#x}: lua_pushnumber: the scripts\' frame time */')
+
+
 def sv_patches(build):
     if build.lower() in SV_BUILDS:
         return {
@@ -119,5 +135,6 @@ def sv_patches(build):
             0x7000cf11e8: _sv_proj_aspect_s16,
             0x7000cf182c: _sv_proj_half_fovy,
             0x7000cf18a4: _sv_proj_aspect_s4,
+            0x7000b46da0: _sv_lua_frame_time,
         }
     return {}

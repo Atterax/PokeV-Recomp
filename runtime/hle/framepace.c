@@ -12,6 +12,7 @@
 //   LARECOMP_FRAME_STEPS_MAX maximum steps per frame (default 4: after a long stall the game doesn't jump ahead)
 //   LARECOMP_FORCE_STEPS=<n> (test) always n
 #include <stdlib.h>
+#include <string.h>
 
 #include "../hle.h"
 
@@ -130,8 +131,10 @@ bool rt_sv_slot_dt(void);
 // Pokémon Legends: Arceus & Pokémon Scarlet & Violet dynamic frame delta-time:
 // Supplies the real wall-clock frame duration in nanoseconds (clamped to [16.67 ms, 50.0 ms] when 60 FPS is on),
 // so the game runs at 1.0x normal speed at 60 FPS (no 2x speed-up) AND stays at 1.0x speed if FPS dips below 60.
+static volatile uint32_t g_game_frame;  // (game frames begun: rt_sv_lua_frame_time writes once per frame)
 uint64_t rt_pla_frame_dt_ns(uint32_t slot, uint64_t default_ns) {
     if (slot == 0) {  // (once a game frame, on the game's thread: Scarlet / Violet's npc_shown.c, npc_detail.c)
+        g_game_frame++;
         extern void rt_sv_npc_shown(void);
         rt_sv_npc_shown();
         extern void rt_sv_npc_detail(void);
@@ -205,3 +208,59 @@ uint64_t rt_sv_slot_duration(uint64_t table_ns) {
 }
 
 
+// Scarlet / Violet's scripts (Lua 5.4) step by a frame time of their own, C075A638F130352C3.S44460EB93267F798 in their
+// globals: 1/30, set when they load and never changed. At 60 fps whatever they integrate with it ran at twice the
+// speed in real time: the ride's jump took off at 8.51 m/s and lost gravity * 1/30 every frame, so it rose half as
+// high and landed in half the time (sv_patches.py _sv_lua_frame_time). Here, from lua_pushnumber (natives hand the
+// scripts numbers many times a frame, on the thread running them - their tables are not changing under us), that
+// global gets this frame's time once a frame: the frame time measured (rt_pla_frame_dt_ns) at 60 fps, 1/30 at 30.
+// Their own fixed-step loops keep working with it (one counts 1/30 s steps out of the time it is handed: a step every
+// other frame at 60). LARECOMP_SV_LUA_DT=0: left as the scripts set it.
+static const uint8_t *lua_find(uint64_t t, const char *name) {  // (Lua 5.4: t.name, a short string key, own hash part)
+    size_t len = strlen(name);
+    uint8_t lsizenode = *(const uint8_t *)(uintptr_t)(t + 0xb);
+    uint64_t node = *(const uint64_t *)(uintptr_t)(t + 0x18);  // (Node: value 0, value tag 8, key tag 9, key 16; 24 bytes)
+    for (uint64_t i = 0; i < (1ull << lsizenode); i++) {
+        const uint8_t *n = (const uint8_t *)(uintptr_t)(node + 24 * i);
+        if (n[9] != 0x44) continue;  // (a short string, collectable)
+        uint64_t ts = *(const uint64_t *)(n + 16);  // (TString: shrlen at 0xb, contents at 0x18)
+        if (*(const uint8_t *)(uintptr_t)(ts + 0xb) == len && !memcmp((const void *)(uintptr_t)(ts + 0x18), name, len)) return n;
+    }
+    return NULL;
+}
+void rt_sv_lua_frame_time(uint64_t L) {
+    static int on = -1;
+    if (on < 0) {
+        const char *e = ENV("LARECOMP_SV_LUA_DT");
+        on = !e || atoi(e) != 0;
+        LOG("[pace] Scarlet / Violet scripts step by the frame time: %s\n", on ? "on" : "off (LARECOMP_SV_LUA_DT=0)");
+    }
+    if (!on) return;
+    static struct { uint64_t g; uint32_t frame; } seen[4];  // (per global state: each has its own globals)
+    uint64_t g = *(const uint64_t *)(uintptr_t)(L + 0x18);  // (lua_State: l_G)
+    uint32_t frame = g_game_frame;
+    int k = 0;
+    while (k < 4 && seen[k].g && seen[k].g != g) k++;
+    if (k == 4) return;
+    if (seen[k].g == g && seen[k].frame == frame) return;
+    seen[k].g = g, seen[k].frame = frame;
+    // (global_State: l_registry at 0x40, a table; its array part's [2] is the globals. Looked up every frame - a
+    // table may be resized, never a pointer kept)
+    const uint8_t *reg = (const uint8_t *)(uintptr_t)(g + 0x40);
+    if ((reg[8] & 0x0f) != 5) return;
+    uint64_t r = *(const uint64_t *)reg;
+    if (*(const uint32_t *)(uintptr_t)(r + 0xc) < 2) return;  // (alimit)
+    const uint8_t *gl = (const uint8_t *)(uintptr_t)(*(const uint64_t *)(uintptr_t)(r + 0x10) + 16);
+    if ((gl[8] & 0x0f) != 5) return;
+    const uint8_t *mod = lua_find(*(const uint64_t *)gl, "C075A638F130352C3");
+    if (!mod || (mod[8] & 0x0f) != 5) return;
+    uint8_t *dt = (uint8_t *)lua_find(*(const uint64_t *)mod, "S44460EB93267F798");
+    if (!dt || dt[8] != 0x13) return;  // (a float)
+    double v = rt_pla_is_60fps() && g_frame_dt_ns ? (double)g_frame_dt_ns / 1e9 : 1.0 / 30;
+    static int logged;
+    if (!logged) {
+        logged = 1;
+        LOG("[pace] the scripts' frame time: %.6f s, now %.6f s\n", *(const double *)dt, v);
+    }
+    memcpy(dt, &v, sizeof v);
+}
