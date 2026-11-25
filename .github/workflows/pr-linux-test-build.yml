@@ -138,22 +138,24 @@ jobs:
             cd /src/build/smoke-zip/PokeV-Recomp-pr42-0e5702e2-linux-x86_64
             [ -x ./AppRun ] && [ -x ./usr/bin/PokeV-Recomp ]
             set +e
-            XDG_DATA_HOME=/tmp/smoke-xdg SDL_VIDEO_DRIVER=dummy LARECOMP_NO_LAUNCHER=1 ./AppRun > /tmp/zip-launch.log 2>&1
+            XDG_DATA_HOME=/tmp/smoke-xdg SDL_VIDEO_DRIVER=dummy LARECOMP_FORCE_LAUNCHER=1 LARECOMP_NO_LAUNCHER=1 ./AppRun > /tmp/zip-launch.log 2>&1
             RC=$?
             set -e
             cat /tmp/zip-launch.log
+            cat /tmp/smoke-xdg/pokev-recomp/logs/lasrecomp.log || true
             [ "$RC" -eq 3 ]
-            grep -q "LARECOMP_NO_LAUNCHER is set" /tmp/zip-launch.log
+            grep -q "LARECOMP_NO_LAUNCHER is set" /tmp/smoke-xdg/pokev-recomp/logs/lasrecomp.log
             [ -d /tmp/smoke-xdg/pokev-recomp ]
 
             set +e
-            XDG_DATA_HOME=/tmp/smoke-xdg SDL_VIDEO_DRIVER=dummy LARECOMP_NO_LAUNCHER=1 \
+            XDG_DATA_HOME=/tmp/smoke-xdg SDL_VIDEO_DRIVER=dummy LARECOMP_FORCE_LAUNCHER=1 LARECOMP_NO_LAUNCHER=1 \
               "/src/build/test-artifacts/appimage/PokeV-Recomp-pr42-0e5702e2-linux-x86_64.AppImage" --appimage-extract-and-run > /tmp/appimage-launch.log 2>&1
             RC2=$?
             set -e
             cat /tmp/appimage-launch.log
+            cat /tmp/smoke-xdg/pokev-recomp/logs/lasrecomp.log || true
             [ "$RC2" -eq 3 ]
-            grep -q "LARECOMP_NO_LAUNCHER is set" /tmp/appimage-launch.log
+            grep -q "LARECOMP_NO_LAUNCHER is set" /tmp/smoke-xdg/pokev-recomp/logs/lasrecomp.log
           '
 
       - name: Upload Linux AppImage Artifact
