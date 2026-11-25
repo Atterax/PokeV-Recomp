@@ -9449,6 +9449,16 @@ static bool fsr2_copy(Prog *pr) {
     extern uint64_t vk_frame_counter(void);
     uint64_t f = vk_frame_counter();
     NvnTexture *rt = st.rt.color[0];
+    {   // (debug) LARECOMP_TAA_TRACE=<frame>: that frame's draws into the picture / shown image, against the resolve
+        static long tr = -2;
+        if (tr == -2) tr = ENV("LARECOMP_TAA_TRACE") ? atol(ENV("LARECOMP_TAA_TRACE")) : -1;
+        if (tr >= 0 && (long)f >= tr && (long)f < tr + 2 && rt && pr)
+            LOG("[taa] f%llu rt %p%s fmt %#x %ux%u depth %d blend %d fs %llx ntex %d tex0 %p%s; resolved %d early %d mv %d\n",
+                (unsigned long long)f, (void *)rt, rt == fsr2_pic ? " (picture)" : "", rt->format, rt->width, rt->height,
+                st.rt.depth != NULL, st.color_state[0] & 1, (unsigned long long)(pr->code[1] ? pr->code[1] : pr->prep_fh),
+                pr->fi ? pr->fi->ntex : -1, (void *)frag_tex(pr, 0), frag_tex(pr, 0) == fsr2_pic && fsr2_pic ? " (picture)" : "",
+                fsr2_ok_frame == f, fsr2_early_frame == f, mv_frame[0] == f);
+    }
     if (fsr2_early_frame == f && fsr2_ok_frame == f && rt && rt != fsr2_pic && frag_tex(pr, 0) == fsr2_pic && fsr2_pic) {
         // the copy of a picture resolved early: brought over as it is (decoded: the blit), and the draw skipped
         TexBackend *db = rt->backend, *sb = fsr2_pic->backend;
@@ -10813,6 +10823,17 @@ static bool sw_walk_risky_(void) {
 #define pass_cur() pass_l_
 #define sw_ctx() ctx_l_
     for (int i = 0; i < naliases; i++) if (is_attachment(aliases[i].src) || is_attachment(aliases[i].dst)) return true;
+    // (the temporal anti-aliasing's resolve - fsr2_copy - ends the pass, so the draws that can bring it are the render
+    // thread's while this frame isn't resolved yet: the interface's first draw into the picture - DLAA's early resolve,
+    // blended, no depth target - and the game's copy into the shown image. On a worker the resolve never came: after a
+    // fast travel the map's first ~5 interface draws went into a worker's part and through DLSS with the scene (the
+    // interface smeared with the camera's motion, as before the early resolve); the resolve waited for the first one
+    // back on the render thread)
+    if (fsr2_wanted() && fsr2_ok_frame != vk_frame_counter() && st.rt.ncolor && st.rt.color[0] && !st.rt.depth) {
+        NvnTexture *r0 = st.rt.color[0];
+        if (r0 == fsr2_pic && (st.color_state[0] & 1) && fsr2_early_on()) return true;
+        if (!(st.color_state[0] & 1) && r0->backend && ((TexBackend *)r0->backend)->presented) return true;
+    }
     if (!st.tpool || !st.program) return false;
     NvnTexture *att[9];  // (the pass's attachments)
     int na = 0;
