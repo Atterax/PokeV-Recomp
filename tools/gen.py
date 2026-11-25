@@ -24,6 +24,8 @@ from lifter import Insn, Lifter, Unsupported, bits, emit_asm_batch, hx, sext
 from nso import Nso, R_AARCH64_RELATIVE
 
 SCRATCH_MEM = 0x7300000000
+JT_REACH = 16  # instructions back from a br to its table guard (b.hi / b.hs), as it has always been
+JT_REACH_WIDE = 32  # the last-resort search (Module.jump_table_wide)
 
 
 def sext26(w):
@@ -126,6 +128,17 @@ class Module:
         if r is None:
             r = self._jump_table_masked(br_pc, entry, end)
         return r
+
+    def jump_table_wide(self, br_pc, entry, end):
+        """Last resort for a br that nothing else resolved: the same guarded table as _jump_table_fallthrough, with the
+        guard up to JT_REACH_WIDE instructions back. A compiler can hoist address arithmetic for the cases between the
+        table lookup and the br (Scarlet / Violet 4.0.0, byte-offset tables at 0x7001d1e7a4, 0x7001d1ec20,
+        0x7008252dd4, 0x700a053dfc: guard 23 instructions back, 12 cases; the br was left to rt_dispatch, "no function
+        at 7001d1e7a8", issues #18 / #19). Only plain instructions may lie between guard and br, and a result must have
+        more than one target (a br that doesn't depend on the index isn't a table); scan() asks only for brs that
+        jump_table() and computed_target() left alone, so nothing resolved before changes."""
+        r = self._jump_table_fallthrough(br_pc, entry, end, reach=JT_REACH_WIDE, straight=True)
+        return r if r and len(r) > 1 else None
 
     def _jump_table_masked(self, br_pc, entry, end):
         """Form: and wIdx, wX, #(2^k - 1) ; <table lookup> ; add xN, xBase, xOff, lsl #2 ; br xN
@@ -248,17 +261,19 @@ class Module:
             return self._emulate_table(br_pc, entry, end, s, bits(cw, 5, 5), count, s)
         return None
 
-    def _jump_table_fallthrough(self, br_pc, entry, end):
+    def _jump_table_fallthrough(self, br_pc, entry, end, reach=JT_REACH, straight=False):
         rn = bits(self.word(br_pc), 5, 5)
-        # find the guarding b.hi / b.hs and its cmp, scanning backwards
+        # find the guarding b.hi / b.hs and its cmp, scanning backwards (at most `reach` instructions; straight: only
+        # plain instructions in between, so the guard is certain to dominate the br - see jump_table_wide)
         a = br_pc - 4
         guard = cmp = None
-        while a >= entry and br_pc - a <= 4 * 16:
+        while a >= entry and br_pc - a <= 4 * reach:
             w = self.word(a)
             if (w & 0xFF000010) == 0x54000000 and bits(w, 0, 4) in (8, 2):
                 guard = a
                 break
-            if self.lift(a).kind in ('b', 'bl', 'blr', 'br', 'ret', 'trap'):
+            k = self.lift(a).kind
+            if k in ('b', 'bl', 'blr', 'br', 'ret', 'trap') or (straight and k not in ('op', 'asm')):
                 return None
             a -= 4
         if guard is None:
@@ -388,6 +403,12 @@ class Module:
                     # unresolved table jump: allow jumping to any instruction of the function
                     tables[a] = 'all'
                     self.stats['br_all_labels'] += 1
+                elif (jt := self.jump_table_wide(a, entry, end)):
+                    tables[a] = jt
+                    labels.update(t for t in jt if entry <= t < end)
+                    ext.update(t for t in jt if not entry <= t < end)
+                    self.stats['jumptables'] += 1
+                    self.stats['jumptables_wide'] += 1
                 else:
                     self.stats['br_dispatch'] += 1
             terminated = ins.kind in ('b', 'br', 'ret', 'trap')
