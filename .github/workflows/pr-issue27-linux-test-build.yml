@@ -1,6 +1,8 @@
 name: PR #43 Linux Test Build (Issue #27)
 
 on:
+  pull_request:
+    branches: [main]
   workflow_dispatch:
     inputs:
       ref:
@@ -13,11 +15,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.ref || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || inputs.ref || github.ref }}
   cancel-in-progress: true
 
 jobs:
   linux-test-build:
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.number == 43
     name: Linux x86_64 Test Build (PR #43 / Issue #27)
     runs-on: ubuntu-latest
     timeout-minutes: 120
@@ -25,7 +28,7 @@ jobs:
       - name: Checkout Target Ref
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.ref || 'fix/issue-27-compute-ubuf-gmem' }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || '50e6d1e2cb77d2186e3a65c507c04a2bb28f08f2' }}
           fetch-depth: 0
 
       - name: Verify Commit Belongs to PR #43 Branch and Contains Issue #27 Fix
