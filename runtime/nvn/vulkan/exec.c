@@ -11876,7 +11876,27 @@ static struct {
     uint32_t prev_moves;      // xm_moves when it was copied (the mirror's window moved since: its offsets are stale)
     int captured, no_prev, replayed, failed, outside;  // (the frame's counts, logged)
     _Atomic int built;
+    // (the mirror ranges this frame's draws read - iv -, and last frame's, packed into prev - piv: each at base, sorted
+    // by lo. Only those are copied: the span from the lowest to the highest grew as the player went from area to area,
+    // the characters' data spread over the whole 256 MB window, and copying all of it each frame took a 4060 from 45 to
+    // 35 fps, DLAA's own cost included)
+    struct MoIv { uint64_t lo, hi, base; } *iv, *piv, *tiv;
+    int niv, iv_cap, npiv, piv_cap, ntiv, tiv_cap;
+    uint64_t copied;  // (the last copy's size, logged)
 } mo;
+typedef struct MoIv MoIv;
+static int mo_iv_cmp(const void *a, const void *b) {
+    uint64_t x = ((const MoIv *)a)->lo, y = ((const MoIv *)b)->lo;
+    return x < y ? -1 : x > y;
+}
+static const MoIv *mo_iv_find(const MoIv *v, int n, uint64_t off, uint64_t size) {  // (the piece holding [off, off + size))
+    int lo = 0, hi = n - 1, k = -1;
+    while (lo <= hi) {
+        int m = (lo + hi) / 2;
+        if (v[m].lo <= off) k = m, lo = m + 1; else hi = m - 1;
+    }
+    return k >= 0 && off + size <= v[k].hi ? &v[k] : NULL;
+}
 static pthread_mutex_t mo_mu = PTHREAD_MUTEX_INITIALIZER;
 
 // last frame's constant buffers, per arena address (one entry per character mesh)
@@ -11926,13 +11946,20 @@ static void objmv_capture(Prog *pr, Pipe *pp, uint32_t streams, const VkDescript
         mv_unpin(), mo.n = 0;  // (last frame's draws, if never drawn again)
         mo.frame = f, mo.seq = submit_seq;
         atomic_store_explicit(&mv_lost, false, memory_order_relaxed);
-        mo.lo = ~0ull, mo.hi = 0;
+        mo.lo = ~0ull, mo.hi = 0, mo.niv = 0;
         mo.captured = mo.no_prev = 0;
     }
     if (atomic_load_explicit(&mv_lost, memory_order_relaxed)) goto out;
     uint64_t off = ss.vo[0];
     if (off < mo.lo) mo.lo = off;
     if (off + v0.size > mo.hi) mo.hi = off + v0.size;
+    if (mo.niv == mo.iv_cap) {
+        int cap = mo.iv_cap ? mo.iv_cap * 2 : 256;
+        MoIv *v = realloc(mo.iv, (size_t)cap * sizeof *v);
+        if (!v) goto out;
+        mo.iv = v, mo.iv_cap = cap;
+    }
+    mo.iv[mo.niv++] = (MoIv){off, off + v0.size, 0};
     // this frame's constant buffers kept for the next; last frame's, if this mesh was drawn then
     MvCbuf *e = mo_cbuf(v0.addr, f);
     if (!e) {
@@ -12223,8 +12250,29 @@ static void objmv_replay(TexBackend *mvb, VkImageView zv, uint32_t w, uint32_t h
     int n = mo.frame == f ? mo.n : 0;
     mo.n = 0;
     mo.replayed = mo.failed = mo.outside = 0;
-    // the copy of this frame's range must fit: a larger buffer made now (last frame's is lost then: no motion drawn)
-    uint64_t need = mo.frame == f && mo.hi > mo.lo && mo.hi <= XM_SIZE ? mo.hi - mo.lo : 0;
+    // this frame's ranges, merged (gaps under 64 KB too: fewer copies) and packed (tiv); the copy of them must fit: a
+    // larger buffer made now (last frame's is lost then: no motion drawn)
+    uint64_t need = 0;
+    mo.ntiv = 0;
+    if (mo.frame == f && mo.niv && mo.hi <= XM_SIZE) {
+        qsort(mo.iv, (size_t)mo.niv, sizeof *mo.iv, mo_iv_cmp);
+        if (mo.tiv_cap < mo.niv) {
+            MoIv *v = realloc(mo.tiv, (size_t)mo.niv * sizeof *v);
+            if (v) mo.tiv = v, mo.tiv_cap = mo.niv;
+        }
+        if (mo.tiv_cap >= mo.niv)
+            for (int i = 0; i < mo.niv; i++) {
+                MoIv a = mo.iv[i];
+                a.lo &= ~15ull;  // (each piece keeps its 16-byte alignment in the copy)
+                if (mo.ntiv && a.lo <= mo.tiv[mo.ntiv - 1].hi + (64u << 10)) {
+                    if (a.hi > mo.tiv[mo.ntiv - 1].hi) mo.tiv[mo.ntiv - 1].hi = a.hi;
+                } else mo.tiv[mo.ntiv++] = a;
+            }
+        for (int i = 0; i < mo.ntiv; i++) {
+            mo.tiv[i].base = need;
+            need += (mo.tiv[i].hi - mo.tiv[i].lo + 255) & ~255ull;
+        }
+    }
     if (need > mo.prev_cap) {
         if (mo.prev) { vk_wait_seq(submit_seq); vmaDestroyBuffer(g_vk.vma, mo.prev, mo.prev_mem); }
         mo.prev = VK_NULL_HANDLE, mo.prev_cap = 0, mo.prev_frame = 0, n = 0;
@@ -12259,7 +12307,8 @@ static void objmv_replay(TexBackend *mvb, VkImageView zv, uint32_t w, uint32_t h
             rec_CmdBeginRendering(cb, &ri);
             for (int k = 0; k < n; k++) {
                 MvDraw *d = &mo.d[k];
-                if (d->off < mo.prev_lo || d->off + d->size > mo.prev_hi) { mo.outside++; continue; }
+                const MoIv *pv = mo_iv_find(mo.piv, mo.npiv, d->off, d->size);
+                if (!pv) { mo.outside++; continue; }
                 MoProg *mp = objmv_prog(d->pr);
                 VkPipeline pipe = mp && atomic_load(&mp->state) == 1 ? objmv_pipe(mp, d->pp) : VK_NULL_HANDLE;
                 if (!pipe) { mo.failed++; continue; }
@@ -12289,7 +12338,7 @@ static void objmv_replay(TexBackend *mvb, VkImageView zv, uint32_t w, uint32_t h
                 rec_CmdSetScissor(cb, 0, 1, &q->sc);
                 VkDescriptorSet sets[3] = {d->sets[0], d->sets[1], set2};
                 rec_CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, mp->layout, 0, 3, sets, d->ndyn, d->ndyn ? d->dyn : NULL);
-                struct { uint32_t off; float w, h, eps; } pc = {(uint32_t)(d->off - mo.prev_lo), (float)w, (float)h, eps};
+                struct { uint32_t off; float w, h, eps; } pc = {(uint32_t)(pv->base + (d->off - pv->lo)), (float)w, (float)h, eps};
                 rec_CmdPushConstants(cb, mp->layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof pc, &pc);
                 if (d->dc.kind == 1 || (d->dc.kind == 2 && d->dc.indexed)) rec_CmdBindIndexBuffer(cb, q->ib, q->io, q->it);
                 for (int i = 0; i < 17; i++)
@@ -12306,11 +12355,23 @@ static void objmv_replay(TexBackend *mvb, VkImageView zv, uint32_t w, uint32_t h
     }
     // this frame's range, for the next frame's motion (after the draws above read last frame's)
     if (mo.prev && need && need <= mo.prev_cap) {
-        vk_full_barrier(cb);
-        VkBufferCopy c = {mo.lo, 0, need};
-        rec_CmdCopyBuffer(cb, xm_buf, mo.prev, 1, &c);
-        vk_full_barrier(cb);
-        mo.prev_frame = f, mo.prev_moves = xm_moves, mo.prev_lo = mo.lo, mo.prev_hi = mo.hi;
+        static VkBufferCopy *rg;
+        static int rg_cap;
+        if (rg_cap < mo.ntiv) {
+            VkBufferCopy *r = realloc(rg, (size_t)mo.ntiv * sizeof *r);
+            if (r) rg = r, rg_cap = mo.ntiv;
+        }
+        if (rg_cap >= mo.ntiv) {
+            for (int i = 0; i < mo.ntiv; i++) rg[i] = (VkBufferCopy){mo.tiv[i].lo, mo.tiv[i].base, mo.tiv[i].hi - mo.tiv[i].lo};
+            vk_full_barrier(cb);
+            rec_CmdCopyBuffer(cb, xm_buf, mo.prev, (uint32_t)mo.ntiv, rg);
+            vk_full_barrier(cb);
+            mo.prev_frame = f, mo.prev_moves = xm_moves, mo.prev_lo = mo.lo, mo.prev_hi = mo.hi;
+            MoIv *t = mo.piv; int tc = mo.piv_cap;  // (this frame's pieces are last frame's for the next)
+            mo.piv = mo.tiv, mo.piv_cap = mo.tiv_cap, mo.npiv = mo.ntiv;
+            mo.tiv = t, mo.tiv_cap = tc, mo.ntiv = 0;
+            mo.copied = need;
+        }
     }
     pthread_mutex_unlock(&mo_mu);
     mv_unpin();  // (the copies kept for the draws: until this submission is done)
@@ -12320,9 +12381,9 @@ static void objmv_replay(TexBackend *mvb, VkImageView zv, uint32_t w, uint32_t h
     if (nlog < 3 || now - last_log > 30000000000ull) {
         nlog++, last_log = now;
         LOG("[objmv] frame %llu: %d character draws kept (%d without last frame's), %d drawn again, %d without a variant, "
-            "%d outside last frame's copy; mirror %llx-%llx copied; %d variants built\n", (unsigned long long)f, mo.captured,
+            "%d outside last frame's copy; mirror %llx-%llx, %.1f MB of it copied in %d pieces; %d variants built\n", (unsigned long long)f, mo.captured,
             mo.no_prev, mo.replayed, mo.failed, mo.outside, (unsigned long long)mo.lo, (unsigned long long)mo.hi,
-            atomic_load(&mo.built));
+            mo.copied / 1048576.0, mo.npiv, atomic_load(&mo.built));
     }
 }
 
