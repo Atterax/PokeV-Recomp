@@ -5535,7 +5535,10 @@ static VkDescriptorBufferInfo gfast_info(void) {
 // (xm_place) go to the heap as before. LARECOMP_VK_XFB_MIRROR=0: off, =1: on. Off by default on AMD GPUs (#22: an RX 9070 XT
 // lost the device on an invalid GPU read in exactly these skinning draws, with robust access on and submissions made
 // one at a time) - their transform feedback goes to the heap's import as before the mirror.
-#define XM_SIZE (256ull << 20)  // (xm_place: 64 MB until 2026-11; a town's arena can come in two parts 140 MB apart)
+#define XM_SIZE (512ull << 20)  // (xm_place: 64 MB until 2026-11, then 256; a town's arena can come in two parts 140 MB apart, and after a long
+// play over several areas the characters' sessions spread over ~340 MB: up to a third of a frame's ~450 sessions fell outside
+// 256 MB, wrote and read the heap in system memory, and each cost the GPU ~15x as much - 30-45 fps in towns on an RTX
+// 4060, where a fresh session held 60. 256 MB more GPU memory: that 4060 had 2.8 of its 7.2 GB budget in use)
 #define XM_CHUNK 256ull
 static VkBuffer xm_buf;
 static VmaAllocation xm_mem;
