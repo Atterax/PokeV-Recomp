@@ -2,8 +2,10 @@
 """tools/gen.py jump-table detection: small synthetic functions (hand-encoded AArch64, no game files) run through
 Module.scan, and - when the player's own Scarlet / Violet 4.0.0 files are at hand - the four byte-offset tables whose guard
 sits 23 to 28 instructions before the br (issues #18 / #19: "no function at 7001d1e7a8").
-Usage: python tools/test_jump_table.py   (needs unicorn, capstone and, for the real files, lz4: skipped without them)
-Real files: LARECOMP_TEST_EXEFS=<folder with main, sdk, subsdk0> (default: the data folder's extracted/exefs)."""
+Usage: python tools/test_jump_table.py   (needs the generator's own packages: pip install capstone==5.0.9 unicorn==2.1.4
+lz4==4.4.5; without them it FAILS rather than skips, so CI can't lose it silently)
+Real files: LARECOMP_TEST_EXEFS=<folder with main, sdk, subsdk0> (default: the data folder's extracted/exefs); skipped when absent.
+"""
 import os, sys
 from collections import Counter
 
@@ -12,8 +14,8 @@ try:
     import gen
     from lifter import Lifter
 except ImportError as e:
-    print(f'SKIP: {e} (pip install unicorn capstone)')
-    sys.exit(0)
+    print(f'FAIL: the generator cannot be imported ({e}): pip install capstone==5.0.9 unicorn==2.1.4 lz4==4.4.5')
+    sys.exit(1)
 
 BASE = 0x7000000000
 TEXT = 0x1000      # the synthetic code
