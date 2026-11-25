@@ -2,7 +2,7 @@ name: PR #42 Linux Test Build
 
 on:
   pull_request:
-    branches: [fix/gamelib-jump-table-detection]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -14,6 +14,7 @@ concurrency:
 
 jobs:
   linux-test-build:
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.number == 42
     name: Linux x86_64 Test Build (PR #42 @ 0e5702e2)
     runs-on: ubuntu-latest
     timeout-minutes: 120
