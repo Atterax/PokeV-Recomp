@@ -1,0 +1,199 @@
+name: PR #43 Linux Test Build (Issue #27)
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref or commit SHA to build'
+        required: true
+        default: 'fix/issue-27-compute-ubuf-gmem'
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-test-build:
+    name: Linux x86_64 Test Build (PR #43 / Issue #27)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout Target Ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || 'fix/issue-27-compute-ubuf-gmem' }}
+          fetch-depth: 0
+
+      - name: Verify Commit Belongs to PR #43 Branch and Contains Issue #27 Fix
+        run: |
+          set -euo pipefail
+          SHA=$(git rev-parse HEAD)
+          SHORT_SHA=$(git rev-parse --short=8 HEAD)
+          echo "SHA=$SHA" >> "$GITHUB_ENV"
+          echo "SHORT_SHA=$SHORT_SHA" >> "$GITHUB_ENV"
+          echo "Building from commit: $SHA ($SHORT_SHA)"
+
+          git fetch origin fix/issue-27-compute-ubuf-gmem main
+          git merge-base --is-ancestor "$SHA" origin/fix/issue-27-compute-ubuf-gmem
+          git merge-base --is-ancestor 50e6d1e2cb77d2186e3a65c507c04a2bb28f08f2 "$SHA"
+
+          # Confirm issue #27 fix is present and PR #42 tools/gen.py changes are absent
+          grep -q 'uint gfind(ulong a)' runtime/nvn/maxwell/translate.c
+          grep -q 'st.ubuf\[5\]\[i\].addr' runtime/nvn/vulkan/exec.c
+          if ! git diff --quiet origin/main..."$SHA" -- tools/gen.py; then
+            echo "Unexpected tools/gen.py diff compared to origin/main!"
+            exit 1
+          fi
+
+      - name: Build Docker Container (Ubuntu 22.04, clang 21, Python 3.12)
+        run: docker build -t za-linux-build -f tools/linux/Containerfile tools/linux
+
+      - name: Build Linux x86_64 AppImage & AppDir
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src za-linux-build bash -euo pipefail -c '
+            apt-get update
+            apt-get install -y --no-install-recommends dotnet-sdk-8.0 python3-venv
+            git config --global --add safe.directory /src
+            ln -sf "$(command -v python3.12)" /usr/local/bin/python
+            PYTHON=python3.12 tools/za/dist-linux.sh
+            find build/linux/x86_64/za-AppDir -type f \( -name "*.so*" -o -perm -u+x \) -exec objdump -T {} + 2>/dev/null |
+              grep -o "GLIBC_[0-9.]*" | sort -uV | tail -1 || true
+          '
+
+      - name: Package AppImage, Portable ZIP, and Test README
+        run: |
+          set -euo pipefail
+          sudo chown -R "$(id -u):$(id -g)" build
+          mkdir -p build/test-artifacts/appimage build/test-artifacts/zip
+
+          cat > build/README-PR43-LINUX-TEST.md <<EOF
+          # PokeV-Recomp — Linux x86_64 Test Build (PR #43 / Issue #27)
+
+          - **Pull Request:** [#43](https://github.com/didslima/PokeV-Recomp/pull/43) (\`Fix compute UBO reads from secondary guest memory pools\`)
+          - **Issue:** [#27](https://github.com/didslima/PokeV-Recomp/issues/27)
+          - **Commit SHA:** \`${SHA}\`
+          - **Target Platform:** Linux \`x86_64\` (Ubuntu 22.04+ / glibc 2.35+, Fedora, Bazzite, Arch, SteamOS)
+          - **Compatibility Note:** \`GAMELIB_ID\` is unchanged; existing compiled \`lasgame.so\` libraries remain compatible. The shader translator cache updates automatically on first visit. Existing saves, \`larecomp.ini\`, and \`~/.local/share/pokev-recomp\` data directory are preserved.
+
+          ## Option 1: AppImage
+
+          \`\`\`bash
+          chmod +x PokeV-Recomp-pr43-${SHORT_SHA}-linux-x86_64.AppImage
+          ./PokeV-Recomp-pr43-${SHORT_SHA}-linux-x86_64.AppImage
+          \`\`\`
+
+          *(If FUSE is unavailable on your system, run with \`--appimage-extract-and-run\`.)*
+
+          ## Option 2: Portable ZIP Archive
+
+          \`\`\`bash
+          unzip PokeV-Recomp-pr43-${SHORT_SHA}-linux-x86_64.zip
+          cd PokeV-Recomp-pr43-${SHORT_SHA}-linux-x86_64
+          ./AppRun
+          \`\`\`
+
+          ## Capturing Logs for Issue Reports (#27)
+
+          If you run from a terminal and want to save full logs to a file:
+
+          \`\`\`bash
+          ./PokeV-Recomp-pr43-${SHORT_SHA}-linux-x86_64.AppImage > pokev-pr43.log 2>&1
+          \`\`\`
+
+          When launched from a desktop environment without a terminal, logs are written automatically to \`~/.local/share/pokev-recomp/logs/lasrecomp.log\`.
+          EOF
+
+          # 1. AppImage artifact
+          ORIG_APPIMAGE=$(ls build/dist/*.AppImage | head -n 1)
+          APPIMAGE_NAME="PokeV-Recomp-pr43-${SHORT_SHA}-linux-x86_64.AppImage"
+          cp "$ORIG_APPIMAGE" "build/test-artifacts/appimage/$APPIMAGE_NAME"
+          chmod +x "build/test-artifacts/appimage/$APPIMAGE_NAME"
+          cp build/README-PR43-LINUX-TEST.md build/test-artifacts/appimage/
+          (cd build/test-artifacts/appimage && sha256sum "$APPIMAGE_NAME" README-PR43-LINUX-TEST.md > SHA256SUMS.txt)
+
+          # 2. Portable ZIP archive from za-AppDir (preserving symlinks & executable bits)
+          ZIP_ROOT="PokeV-Recomp-pr43-${SHORT_SHA}-linux-x86_64"
+          ZIP_NAME="${ZIP_ROOT}.zip"
+          rm -rf "build/linux/x86_64/$ZIP_ROOT"
+          cp -a build/linux/x86_64/za-AppDir "build/linux/x86_64/$ZIP_ROOT"
+          cp build/README-PR43-LINUX-TEST.md "build/linux/x86_64/$ZIP_ROOT/"
+          (cd build/linux/x86_64 && zip -q -r -y "$PWD/../../test-artifacts/zip/$ZIP_NAME" "$ZIP_ROOT")
+          cp build/README-PR43-LINUX-TEST.md build/test-artifacts/zip/
+          (cd build/test-artifacts/zip && sha256sum "$ZIP_NAME" README-PR43-LINUX-TEST.md > SHA256SUMS.txt)
+
+          ls -lh build/test-artifacts/appimage build/test-artifacts/zip
+
+      - name: Validate Artifacts & Launch Smoke Test
+        run: |
+          set -euo pipefail
+          APPIMAGE="build/test-artifacts/appimage/PokeV-Recomp-pr43-${SHORT_SHA}-linux-x86_64.AppImage"
+          ZIPFILE="build/test-artifacts/zip/PokeV-Recomp-pr43-${SHORT_SHA}-linux-x86_64.zip"
+
+          # Verify both files exist and are non-empty
+          [ -s "$APPIMAGE" ] && [ -x "$APPIMAGE" ]
+          [ -s "$ZIPFILE" ]
+
+          # Verify AppImage ELF/AppImage header
+          python3 -c "
+          d = open('$APPIMAGE', 'rb').read(16)
+          assert d[:4] == b'\x7fELF' and d[8:11] == b'AI\x02', f'Unexpected header: {d!r}'
+          print('AppImage header OK')
+          "
+
+          # Verify ZIP contents and permissions
+          unzip -l "$ZIPFILE" | head -n 40
+          unzip -Z -1 "$ZIPFILE" | grep -q '/AppRun$'
+          unzip -Z -1 "$ZIPFILE" | grep -q '/usr/bin/PokeV-Recomp$'
+          unzip -Z -1 "$ZIPFILE" | grep -q '/usr/bin/lasgen/lasgen$'
+          unzip -Z -1 "$ZIPFILE" | grep -q '/usr/bin/zaprompts/zaprompts$'
+          unzip -Z -1 "$ZIPFILE" | grep -q '/usr/bin/zaimport/zaimport$'
+          unzip -Z -1 "$ZIPFILE" | grep -q '/usr/bin/zig/zig$'
+          unzip -Z -1 "$ZIPFILE" | grep -q '/usr/lib/libSDL3.so.0$'
+          unzip -Z -1 "$ZIPFILE" | grep -q '/README-PR43-LINUX-TEST.md$'
+
+          # Smoke-test launch inside Ubuntu 22.04 container from unpacked ZIP & AppImage
+          rm -rf build/smoke-zip && mkdir -p build/smoke-zip
+          unzip -q "$ZIPFILE" -d build/smoke-zip
+          docker run --rm -v "$PWD:/src" -w /tmp za-linux-build bash -euo pipefail -c "
+            cd \"/src/build/smoke-zip/PokeV-Recomp-pr43-${SHORT_SHA}-linux-x86_64\"
+            [ -x ./AppRun ] && [ -x ./usr/bin/PokeV-Recomp ]
+            set +e
+            XDG_DATA_HOME=/tmp/smoke-xdg SDL_VIDEO_DRIVER=dummy LARECOMP_FORCE_LAUNCHER=1 LARECOMP_NO_LAUNCHER=1 ./AppRun > /tmp/zip-launch.log 2>&1
+            RC=\$?
+            set -e
+            cat /tmp/zip-launch.log
+            cat /tmp/smoke-xdg/pokev-recomp/lasrecomp.log || true
+            [ \"\$RC\" -eq 3 ]
+            grep -q 'LARECOMP_NO_LAUNCHER is set' /tmp/smoke-xdg/pokev-recomp/lasrecomp.log
+            [ -d /tmp/smoke-xdg/pokev-recomp ]
+
+            set +e
+            XDG_DATA_HOME=/tmp/smoke-xdg SDL_VIDEO_DRIVER=dummy LARECOMP_FORCE_LAUNCHER=1 LARECOMP_NO_LAUNCHER=1 \
+              \"/src/build/test-artifacts/appimage/PokeV-Recomp-pr43-${SHORT_SHA}-linux-x86_64.AppImage\" --appimage-extract-and-run > /tmp/appimage-launch.log 2>&1
+            RC2=\$?
+            set -e
+            cat /tmp/appimage-launch.log
+            cat /tmp/smoke-xdg/pokev-recomp/lasrecomp.log || true
+            [ \"\$RC2\" -eq 3 ]
+            grep -q 'LARECOMP_NO_LAUNCHER is set' /tmp/smoke-xdg/pokev-recomp/lasrecomp.log
+          "
+
+      - name: Upload Linux AppImage Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PokeV-Recomp-pr43-issue27-linux-x86_64-AppImage
+          path: build/test-artifacts/appimage/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload Linux ZIP Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PokeV-Recomp-pr43-issue27-linux-x86_64-zip
+          path: build/test-artifacts/zip/
+          if-no-files-found: error
+          retention-days: 30
