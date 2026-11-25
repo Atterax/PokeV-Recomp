@@ -4182,7 +4182,7 @@ static uint64_t snap_storage(uint64_t addr, uint64_t size, bool cs_slot) {
     extern _Atomic int kernel_guard_hit;  // (a physical mapping over the ring: kernel.c phys_map)
     if (gwin_.phys ? kernel_guard_hit != 0 : kernel_heap_size() > snap_base) {  // (the game grew into the ring: off from now on)
         static bool logged;
-        if (!logged) { logged = true; LOG("[vk] storage snapshots off: the game's heap grew into the ring\n"); }
+        if (!logged) { logged = true; LOG("[vk] storage snapshots off: the game's %s\n", gwin_.phys ? "memory mapped over the ring" : "heap grew into the ring"); }
         snap_state = 0;
         return addr;
     }

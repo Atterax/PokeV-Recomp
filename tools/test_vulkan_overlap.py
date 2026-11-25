@@ -150,7 +150,15 @@ uint64_t renderer_exec_frame(void) { return frame; }
 static const char *level = "Field";
 const char *game_level_name(void) { return level; }
 static uint64_t stat_snap_bytes, stat_snap_copies;
+// The guest memory window (exec.c gwin_pick): the heap here; a physical-memory window (Scarlet / Violet) in phys_main
+#include <stdatomic.h>
+typedef struct { uint64_t base, max; bool phys; } GWin;
+static GWin gwin_;
+static atomic_bool gwin_done = true;
+static uint64_t gwin_ring;
+_Atomic int kernel_guard_hit;
 ''' + snap + r'''
+static uint32_t vc_gen_now(void) { return pgen; }
 static void snap_ring_import_tail(void) {}
 static bool heap_is_userptr(void) { return userptr; }
 static uint64_t ring_lo(void) { return HEAP_BASE + snap_base; }
@@ -264,6 +272,34 @@ static void watch_tests(void) {
     puts("PASS: write watch - in place + tracked, CPU writes that keep coming make a copy for good (a single one doesn't), no demotion on level / idle, GPU writes ignored, a shared page marks both, a page shared with a small parameter block doesn't, a prior write is consumed, draw reads copy, other lookers");
 }
 
+// A game on physical memory (Scarlet / Violet): the ring right past its pool (gwin_ring), and a draw's storage read
+// the CPU wrote lately copied at translation, once a frame per range; compute slots, larger ranges and unwritten
+// ones in place; a mapping over the ring turns the copies off
+static void phys_main(void) {
+    gwin_ = (GWin){HEAP_BASE, (16ull << 20) + SNAP_RING, true};
+    gwin_ring = 16ull << 20;
+    heap_size = 16ull << 20;  // (plat_commit's check: the ring at HEAP_BASE + 16 MB)
+    assert(snap_on() && snap_base == (16ull << 20) && snap_ring_end() == 0);
+    uint64_t A = HEAP_BASE + 0x1000, T = HEAP_BASE + 0x20000, L = HEAP_BASE + 0x200000;
+    memset(heap_mem + 0x1000, 7, 0x340);
+    assert(snap_storage(A, 0x340, false) == A);  // not written: in place
+    cpu_wrote(A);
+    frame++;
+    uint64_t c = snap_storage(A, 0x340, false);
+    assert(in_ring(c) && !memcmp((void *)(uintptr_t)c, (void *)(uintptr_t)A, 0x340));
+    unsigned l = looks;
+    assert(snap_storage(A, 0x340, false) == c && looks == l);  // (decided once a frame)
+    cpu_wrote(T);
+    assert(snap_storage(T, 0x9570, true) == T);  // a compute slot: in place
+    cpu_wrote(L);
+    assert(snap_storage(L, 65536 + 4096, false) == L);  // over 64 KB: in place
+    frame++;
+    kernel_guard_hit = 1;
+    cpu_wrote(A);
+    assert(snap_storage(A, 0x340, false) == A && snap_state == 0);  // the game mapped over the ring: off
+    puts("PASS: physical-memory window - the ring past the pool, lately written draw reads copied once a frame, compute / large / unwritten in place, a mapping over the ring");
+}
+
 int main(int argc, char **argv) {
 #ifdef _WIN32
     heap_mem = _aligned_malloc(HEAP_MAX, 0x10000);  // (MinGW has no posix_memalign)
@@ -273,6 +309,7 @@ int main(int argc, char **argv) {
     else memset(heap_mem, 0, HEAP_MAX);
 #endif
     assert(heap_mem);
+    if (argc > 1 && !strcmp(argv[1], "phys")) { phys_main(); return 0; }
     if (argc > 1 && !strcmp(argv[1], "watch")) { watch_tests(); return 0; }
     if (argc > 1 && !strcmp(argv[1], "notrack")) {  // no OS write tracking (a userptr / dma-buf heap on Linux, no write watch): the probe instead
         track_off = 1; userptr = true;
@@ -493,5 +530,6 @@ with tempfile.TemporaryDirectory(prefix='vulkan-overlap-') as temporary:
             subprocess.run([str(exe)], check=True, timeout=10, env=dict(env, LARECOMP_OVERLAP_WATCH='0'))
             subprocess.run([str(exe), 'watch'], check=True, timeout=10, env=env)
             subprocess.run([str(exe), 'notrack'], check=True, timeout=10, env=env)
+            subprocess.run([str(exe), 'phys'], check=True, timeout=10, env=env)
         else:
             subprocess.run([str(exe)], check=True, timeout=10, env=env)
