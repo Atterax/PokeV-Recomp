@@ -142,9 +142,9 @@ jobs:
             RC=$?
             set -e
             cat /tmp/zip-launch.log
-            cat /tmp/smoke-xdg/pokev-recomp/logs/lasrecomp.log || true
+            cat /tmp/smoke-xdg/pokev-recomp/lasrecomp.log || true
             [ "$RC" -eq 3 ]
-            grep -q "LARECOMP_NO_LAUNCHER is set" /tmp/smoke-xdg/pokev-recomp/logs/lasrecomp.log
+            grep -q "LARECOMP_NO_LAUNCHER is set" /tmp/smoke-xdg/pokev-recomp/lasrecomp.log
             [ -d /tmp/smoke-xdg/pokev-recomp ]
 
             set +e
@@ -153,9 +153,9 @@ jobs:
             RC2=$?
             set -e
             cat /tmp/appimage-launch.log
-            cat /tmp/smoke-xdg/pokev-recomp/logs/lasrecomp.log || true
+            cat /tmp/smoke-xdg/pokev-recomp/lasrecomp.log || true
             [ "$RC2" -eq 3 ]
-            grep -q "LARECOMP_NO_LAUNCHER is set" /tmp/smoke-xdg/pokev-recomp/logs/lasrecomp.log
+            grep -q "LARECOMP_NO_LAUNCHER is set" /tmp/smoke-xdg/pokev-recomp/lasrecomp.log
           '
 
       - name: Upload Linux AppImage Artifact
