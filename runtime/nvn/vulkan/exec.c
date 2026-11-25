@@ -2458,6 +2458,11 @@ static void compile_program(void *arg) {
 // once, at first use: shaders bake the base in.
 typedef struct { uint64_t base, max; bool phys; } GWin;
 static GWin gwin_ = {HEAP_BASE, HEAP_MAX, false};
+// (a physical-memory window) the storage copies' ring (snap_storage): 16 MB right past the game's pool, inside the
+// window - shaders reach storage by guest address through it. Offset in the window, 0: none (no room, or something
+// mapped there). The kernel tells the game of 16 MB less memory for it (kernel.c snap_reserve)
+#define GWIN_RING (16ull << 20)
+static uint64_t gwin_ring;
 static atomic_bool gwin_done;
 static void gwin_pick(void) {
     static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
@@ -2475,6 +2480,17 @@ static void gwin_pick(void) {
         } else if (kernel_heap_size() && kernel_heap_size() >= sz) atomic_store(&gwin_done, true);
         else if (sz >= (64ull << 20)) {
             gwin_ = (GWin){a, sz < HEAP_MAX ? sz : HEAP_MAX, true};
+            extern bool kernel_range_free(uint64_t addr, uint64_t size);
+            extern void kernel_guard_range(uint64_t addr, uint64_t size);
+            const char *e = getenv("LARECOMP_OVERLAP_SNAP");
+            uint64_t ro = (sz + 0xFFFF) & ~0xFFFFull;  // (minImportedHostPointerAlignment: 64 KB at most)
+            if ((!e || atoi(e) != 0) && ro + GWIN_RING <= HEAP_MAX && kernel_range_free(a + ro, GWIN_RING)) {
+                plat_commit(a + ro, GWIN_RING);  // (Windows: backed before the import pins it)
+                kernel_guard_range(a + ro, GWIN_RING);
+                gwin_ring = ro;
+                gwin_.max = ro + GWIN_RING;
+            } else LOG("[vk] no room for the storage copies' ring past the game's pool (%llx +%llx)\n", (unsigned long long)a,
+                       (unsigned long long)sz);
             LOG("[vk] guest memory window: physical memory %llx +%llx (heap %llu MB)\n", (unsigned long long)a,
                 (unsigned long long)gwin_.max, (unsigned long long)kernel_heap_size() >> 20);
             atomic_store(&gwin_done, true);
@@ -3954,27 +3970,37 @@ static uint64_t range_hash(uint64_t addr, uint64_t size) {
 }
 static void snap_ring_import_tail(void);  // (with the lazy chunks below)
 // Decided once the game's heap is set up (SetHeapSize), which is before anything is drawn: the ring follows the heap.
+static uint64_t snap_org(void) { return atomic_load(&gwin_done) && gwin_.phys ? gwin_.base : HEAP_BASE; }  // (snap_base / the ring: offsets from it)
 static bool snap_on(void) {
     if (snap_state >= 0) return snap_state;
-    uint64_t heap = kernel_heap_size();
-    if (!heap) return false;  // (not decided yet)
+    // (a game on physical memory - Scarlet / Violet, Z-A: no heap - has its ring past its pool: gwin_pick. Not picked
+    // here: the window is picked at its first real use, once the pool is mapped)
+    if (!atomic_load(&gwin_done)) return false;  // (not decided yet)
+    bool phys = gwin_.phys;
+    uint64_t heap = phys ? gwin_ring : kernel_heap_size();
+    if (!heap) {
+        if (!phys) return false;  // (not decided yet)
+        snap_state = 0;
+        LOG("[vk] storage snapshots off: no ring in the guest memory window\n");
+        return false;
+    }
     const char *e = getenv("LARECOMP_OVERLAP_SNAP");
     snap_state = (!e || atoi(e) != 0) && overlap_on();
     if (snap_state) {
         snap_base = (heap + 0xFFFF) & ~0xFFFFull;  // (minImportedHostPointerAlignment: 64 KB at most)
-        if (snap_base + SNAP_RING > HEAP_MAX) {
+        if (!phys && snap_base + SNAP_RING > HEAP_MAX) {
             snap_state = 0;
             LOG("[vk] storage snapshots off: the game's heap fills the range\n");
         } else {
-            plat_commit(HEAP_BASE + snap_base, SNAP_RING);  // (Windows: backed before the import pins it)
-            LOG("[vk] storage buffers the CPU rewrites: copies at %llx (%llu MB ring after the game's heap)\n",
-                (unsigned long long)(HEAP_BASE + snap_base), (unsigned long long)(SNAP_RING >> 20));
+            plat_commit(snap_org() + snap_base, SNAP_RING);  // (Windows: backed before the import pins it)
+            LOG("[vk] storage buffers the CPU rewrites: copies at %llx (%llu MB ring after the game's %s)\n",
+                (unsigned long long)(snap_org() + snap_base), (unsigned long long)(SNAP_RING >> 20), phys ? "pool" : "heap");
             snap_ring_import_tail();  // (lazy chunks: one imported short of the ring already is imported again over it)
         }
     }
     return snap_state;
 }
-static uint64_t snap_ring_end(void) { return snap_on() ? snap_base + SNAP_RING : 0; }  // (heap offset; 0: no ring)
+static uint64_t snap_ring_end(void) { return !(atomic_load(&gwin_done) && gwin_.phys) && snap_on() ? snap_base + SNAP_RING : 0; }  // (heap offset; 0: no ring)
 static void snap_reset(void) {  // (vk_exec_reset: a reboot - the heap is set up again, its pages replaced)
     snap_state = -1;
     snap_base = snap_off = 0;
@@ -4003,7 +4029,7 @@ static void rs_log(RangeState *e, const char *what, bool cs_slot, uint64_t f) { 
 // The offset in the current half where `need` bytes fit from `at` on, skipping live copies (with their pristine
 // images); ~0 when none
 static uint64_t rs_ring_fit(uint64_t at, uint64_t need) {
-    uint64_t half_lo = HEAP_BASE + snap_base + (uint64_t)snap_half * SNAP_HALF;
+    uint64_t half_lo = snap_org() + snap_base + (uint64_t)snap_half * SNAP_HALF;
     for (bool moved = true; moved && at + need <= SNAP_HALF;) {
         moved = false;
         for (int i = 0; i < nrs; i++) {
@@ -4038,7 +4064,7 @@ static uint64_t ring_take(uint64_t need) {
         }
     }
     snap_off = at + need;
-    return HEAP_BASE + snap_base + (uint64_t)snap_half * SNAP_HALF + at;
+    return snap_org() + snap_base + (uint64_t)snap_half * SNAP_HALF + at;
 }
 // A copy a compute dispatch binds carries the GPU's own writes into it (the exposure program 72a8da6000 keeps its
 // adaptation state in the 2040-byte exposure list it reads and writes; the lists' tile data beside it is the CPU's).
@@ -4145,18 +4171,49 @@ static int watch_check(RangeState *e) {
 }
 
 // The address a binder of [addr, addr+size) uses: the original or its copy (cs_slot: bound by a compute dispatch)
+static uint32_t vc_gen_now(void);  // (the page tables' current generation: below)
 static uint64_t snap_storage(uint64_t addr, uint64_t size, bool cs_slot) {
-    if (!snap_on() || !addr || !size || addr < HEAP_BASE || addr - HEAP_BASE + size > snap_base) return addr;
+    if (!snap_on() || !addr || !size || addr < snap_org() || addr - snap_org() + size > snap_base) return addr;
     if (size > SNAP_HALF / 2) {  // (the tile lists grow with the render resolution: ~1.2 MB at 7680x4320; a half holds two of these)
         static int logged;
         if (logged++ < 4) LOG("[vk] storage range %llx+%llu too large for a snapshot: read in place\n", (unsigned long long)addr, (unsigned long long)size);
         return addr;
     }
-    if (kernel_heap_size() > snap_base) {  // (the game grew its heap into the ring: off from now on)
+    extern _Atomic int kernel_guard_hit;  // (a physical mapping over the ring: kernel.c phys_map)
+    if (gwin_.phys ? kernel_guard_hit != 0 : kernel_heap_size() > snap_base) {  // (the game grew into the ring: off from now on)
         static bool logged;
         if (!logged) { logged = true; LOG("[vk] storage snapshots off: the game's heap grew into the ring\n"); }
         snap_state = 0;
         return addr;
+    }
+    if (gwin_.phys) {
+        // A game on physical memory (Scarlet / Violet): a draw's storage read the CPU wrote in the last frames is copied
+        // at translation, the rest stays in place. The map's text (its labels' blocks and glyph table, read as storage
+        // by the glyphs' vertex program) is rewritten every ~20 frames in one copy; with the frame fence deferred the
+        // GPU read the next frame's text - letters missing for 2 frames. The pool-flag decisions below are Link's
+        // Awakening's (heap) and know only some of these pools; compute slots stay in place, as before here
+        if (cs_slot || size > 65536) return addr;
+        // (decided once a frame per range: the glyph table is bound by every text draw, the page query each time cost
+        // ~7 fps on the map)
+        extern uint64_t renderer_exec_frame(void);
+        uint64_t fr = renderer_exec_frame();
+        static struct { uint64_t addr, size, frame, at; } memo[1024];
+        uint64_t hk = (addr * 0x9E3779B97F4A7C15ull) ^ size;
+        __typeof__(memo[0]) *m = &memo[(hk >> 40) & 1023];
+        if (m->addr == addr && m->size == size && m->frame == fr + 1) return m->at;
+        uint32_t now;
+        uint64_t at = addr;
+        if (pages_cpu_written(addr, size, vc_gen_now(), &now) == 1) {  // (written lately: still unsettled, or now)
+            uint64_t c = ring_take((size + 255) & ~255ull);
+            if (c) {
+                memcpy((void *)(uintptr_t)c, (const void *)(uintptr_t)addr, size);
+                stat_snap_bytes += size;
+                stat_snap_copies++;
+                at = c;
+            }
+        }
+        *m = (__typeof__(*m)){addr, size, fr + 1, at};
+        return at;
     }
     extern int nvn_pool_flags_at(uint64_t addr);
     int pf = nvn_pool_flags_at(addr);
@@ -5159,7 +5216,7 @@ static bool gc_import(int k) {
 // decided, short of it: imported again over the ring (gc_import replaces it; the old import goes once its submissions
 // are done). snap_state is set before this runs, so gmem_heap_size's answer includes the ring here.
 static void snap_ring_import_tail(void) {
-    if (!gc_lazy || !gc_shift) return;
+    if (!gc_lazy || !gc_shift || gwin_.phys) return;  // (a physical-memory window: its ring is in the one import)
     for (int k = (int)(snap_base >> gc_shift); k <= (int)((snap_base + SNAP_RING - 1) >> gc_shift) && k < gc_n; k++)
         if (gc[k].buf && gc[k].size < gmem_heap_size() - ((uint64_t)k << gc_shift)) gc_import(k);
 }
@@ -5972,6 +6029,7 @@ static uint32_t *vc_page_settle;  // per heap page: the generation of the first 
 #define VC_RECENT 8u
 extern uint64_t vk_frame_counter(void);
 static uint32_t vc_gen = 1, vc_epoch = 1;  // (epoch: bumped when pages turn GPU-written: entries check again)
+static uint32_t vc_gen_now(void) { return vc_gen; }
 static inline void vc_seen(uint64_t p, uint32_t g) {
     vc_page_gen[p] = g;
     vc_page_wfr[p] = (uint32_t)vk_frame_counter() + 1;
