@@ -866,12 +866,12 @@ static void emit_atom(Ctx *c, uint64_t w, bool red) {
     else sprintf(addr, "(ulong(%s) + ulong(%lld))", R(a), (long long)off);
     strcpy(v, R(b));
     strcpy(vh, size == 2 ? R(b + 1) : "0u");
-    sp(&c->body, "    { ulong ga = %s - 0x%llxul; bool ok = ga < 0x%llxul; uint old = 0u, old_hi = 0u;\n", addr,
+    sp(&c->body, "    { ulong ea = %s; ulong ga = ea - 0x%llxul; bool ok = ga < 0x%llxul; uint old = 0u, old_hi = 0u;\n", addr,
        (unsigned long long)maxwell_gmem_base, (unsigned long long)maxwell_gmem_size);
     bool fast = c->stage == STAGE_COMPUTE;
     if (fast) {
         c->info->uses_gmem_map = true;
-        sp(&c->body, "      uint fw = ok ? gfind(uint(ga)) : 0xFFFFFFFFu;\n");
+        sp(&c->body, "      uint fw = gfind(ea);\n");
     }
     static const char *const direct[] = {"atomicAdd", "atomicMin", "atomicMax", NULL, NULL, "atomicAnd", "atomicOr",
                                          "atomicXor", "atomicExchange"};
@@ -1912,7 +1912,7 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         if (a == RZ) sprintf(addr, "ulong(%lld)", (long long)off);
         else if (wide) sprintf(addr, "((ulong(%s) << 32 | ulong(%s)) + ulong(%lld))", R(a + 1), R(a), (long long)off);
         else sprintf(addr, "(ulong(%s) + ulong(%lld))", R(a), (long long)off);
-        sp(&c->body, "    { ulong ga = %s - 0x%llxul; bool ok = ga < 0x%llxul;\n", addr,
+        sp(&c->body, "    { ulong ea = %s; ulong ga = ea - 0x%llxul; bool ok = ga < 0x%llxul;\n", addr,
            (unsigned long long)maxwell_gmem_base, (unsigned long long)maxwell_gmem_size);
         static const char *const ld_small[] = {"uint(gmem[ga])", "uint(int(char(gmem[ga])))",
                                                "uint(*(device ushort *)(gmem + ga))", "uint(int(*(device short *)(gmem + ga)))"};
@@ -1928,7 +1928,7 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
             static const char *const gl_small[] = {
                 "(%s >> (uint(ga & 3ul) * 8u)) & 0xFFu", "uint(sx8(%s >> (uint(ga & 3ul) * 8u)))",
                 "(%s >> (uint(ga & 2ul) * 8u)) & 0xFFFFu", "uint(sx16(%s >> (uint(ga & 2ul) * 8u)))"};
-            sp(&c->body, "      uint fw = ok ? gfind(uint(ga)) : 0xFFFFFFFFu;\n");
+            sp(&c->body, "      uint fw = gfind(ea);\n");
             if (!store) {
                 if (size < 4) {
                     if (d != RZ) {
@@ -1959,7 +1959,7 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
                 if (size < 4) {
                     uint32_t m = size < 2 ? 0xFFu : 0xFFFFu;
                     const char *bm = size < 2 ? "3ul" : "2ul";
-                    sp(&c->body, "      if (ok) { uint sh = uint(ga & %s) * 8u; uint v = (%s & 0x%xu) << sh;\n", bm, R(d), m);
+                    sp(&c->body, "      if (ok || fw != 0xFFFFFFFFu) { uint sh = uint(ea & %s) * 8u; uint v = (%s & 0x%xu) << sh;\n", bm, R(d), m);
                     sp(&c->body, "        if (fw != 0xFFFFFFFFu) { atomicAnd(gfast_.w[fw], ~(0x%xu << sh)); atomicOr(gfast_.w[fw], v); }\n", m);
                     sp(&c->body, "        else { GMAND(uint(ga >> 2), ~(0x%xu << sh)); GMOR(uint(ga >> 2), v); } }\n", m);
                 } else if (lazy_wide) {
@@ -2729,8 +2729,9 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         sp(&s, "layout(std140, set = %d, binding = %d) uniform GMap { uvec4 gmap[%d]; };\n", set, GMAP_BUFFER_INDEX, GMAP_MAX + 1);
         sp(&s, "layout(std430, set = %d, binding = %d) %sbuffer GFast { uint w[]; } gfast_;\n", set, GFAST_BUFFER_INDEX,
            c->uses_gmem_store ? "" : "readonly ");
-        sp(&s, "uint gfind(uint g) { uint n = gmap[%d].x; for (uint i = 0u; i < n; i++) { uint o = g - gmap[i].x; "
-               "if (g >= gmap[i].x && o < gmap[i].y) return gmap[i].z + (o >> 2); } return 0xFFFFFFFFu; }\n", GMAP_MAX);
+        sp(&s, "uint gfind(ulong a) { uint n = gmap[%d].x; for (uint i = 0u; i < n; i++) { "
+               "ulong b = (ulong(gmap[i].w) << 32) | ulong(gmap[i].x); ulong o = a - b; "
+               "if (a >= b && o < ulong(gmap[i].y)) return gmap[i].z + uint(o >> 2); } return 0xFFFFFFFFu; }\n", GMAP_MAX);
     }
     if (xfb) sp(&s, "layout(std140, set = 0, binding = 18) uniform RScale { vec4 rscale[70]; };\n");
     if (c->uses_rscale && stage != STAGE_VERTEX) {

@@ -5826,19 +5826,23 @@ static void gfast_prepare(VkCommandBuffer cb) {
     if (on < 0) { const char *e = ENV("LARECOMP_VK_GMEM_FAST"); on = e ? atoi(e) != 0 : g_vk.props.deviceType != VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU; }
     memset(gmap_tab, 0, sizeof gmap_tab);
     gfast_n = 0;
+    gfast_back_n = 0;
     if (!gc_lazy) gmem_info();  // (the heap import, made on first use)
     gfast_info();
-    if (!on || (!gmem_buf && !gc_lazy) || gmem_lo) return;  // (gmem_lo: a windowed import - its offsets are not the heap's)
+    if (!gfast_buf) return;
+    bool do_in = on && (gmem_buf || gc_lazy) && !gmem_lo;  // (gmem_lo: a windowed import - its offsets are not the heap's)
     struct { uint64_t lo, hi; } r[16];
     int n = 0;
-    for (int i = 0; i < 16; i++) {  // window offsets of the bound storage buffers, 256-aligned
-        uint64_t a = sbufs(5)[i].addr, sz = sbufs(5)[i].size;  // (overlap: a snapshotted range's copy is what gets copied)
-        if (!a || !sz || a < gwin_base || !gmem_covers(a - gwin_base, sz)) continue;
-        uint64_t lo = (a - gwin_base) & ~255ull, hi = (a - gwin_base + sz + 255) & ~255ull, top = gc_lazy ? gmem_heap_size() : gmem_size;
-        if (hi > top) hi = top;
-        int k = n++;
-        while (k > 0 && r[k - 1].lo > lo) { r[k] = r[k - 1]; k--; }  // (insertion sort by start)
-        r[k].lo = lo; r[k].hi = hi;
+    if (do_in) {
+        for (int i = 0; i < 16; i++) {  // window offsets of the bound storage buffers, 256-aligned
+            uint64_t a = sbufs(5)[i].addr, sz = sbufs(5)[i].size;  // (overlap: a snapshotted range's copy is what gets copied)
+            if (!a || !sz || a < gwin_base || !gmem_covers(a - gwin_base, sz)) continue;
+            uint64_t lo = (a - gwin_base) & ~255ull, hi = (a - gwin_base + sz + 255) & ~255ull, top = gc_lazy ? gmem_heap_size() : gmem_size;
+            if (hi > top) hi = top;
+            int k = n++;
+            while (k > 0 && r[k - 1].lo > lo) { r[k] = r[k - 1]; k--; }  // (insertion sort by start)
+            r[k].lo = lo; r[k].hi = hi;
+        }
     }
     int m = 0;
     for (int i = 0; i < n; i++) {  // merge overlapping / nearby ranges (a small gap costs less than another table entry)
@@ -5851,13 +5855,37 @@ static void gfast_prepare(VkCommandBuffer cb) {
         uint64_t len = r[i].hi - r[i].lo;
         if (m > GMAP_MAX || off + len > GFAST_SIZE) return;  // (too much: the heap as before)
         cp[i] = (VkBufferCopy){r[i].lo, off, len};
-        gmap_tab[i * 4 + 0] = (uint32_t)r[i].lo;
+        uint64_t ga = gwin_base + r[i].lo;
+        gmap_tab[i * 4 + 0] = (uint32_t)ga;
         gmap_tab[i * 4 + 1] = (uint32_t)len;
         gmap_tab[i * 4 + 2] = (uint32_t)(off >> 2);
+        gmap_tab[i * 4 + 3] = (uint32_t)(ga >> 32);
         off += (len + 255) & ~255ull;
     }
-    if (!m) return;
-    if (ENV("LARECOMP_LOG_GFAST")) {  // (debug) =<shader code address hex>: that shader's first tables
+    // Stage uniform buffers that live outside the imported gmem window (e.g. Scarlet & Violet's secondary VAMM pools
+    // at 0x744... when gwin only covers 0x7676b00000+, or below gmem_lo on windowed iGPUs): compute shaders read
+    // their cb0[33+i] pointers via LDG/GMR, which would otherwise fail the gmem bounds check and read zero.
+    uint64_t g_lo = (gc_lazy || gmem_buf) ? gwin_base + (gc_lazy ? 0 : gmem_lo) : 0;
+    uint64_t g_hi = (gc_lazy || gmem_buf) ? gwin_base + (gc_lazy ? gwin_max : gmem_lo + gmem_size) : 0;
+    int total = m;
+    for (int i = 0; i < 16 && total < GMAP_MAX; i++) {
+        uint64_t a = st.ubuf[5][i].addr, sz = st.ubuf[5][i].size;
+        if (!a || !sz || sz > (1ull << 20)) continue;
+        if (g_hi && a >= g_lo && a + sz <= g_hi && a + sz >= a) continue;
+        uint64_t lo = a & ~3ull, hi = (a + sz + 3ull) & ~3ull, len = hi - lo;
+        if (off + len > GFAST_SIZE) break;
+        VkSpan sp = vk_transient_copy((const void *)(uintptr_t)lo, (size_t)len, 256);
+        VkBufferCopy hc = {sp.off, off, len};
+        rec_CmdCopyBuffer(cb, sp.buf, gfast_buf, 1, &hc);
+        gmap_tab[total * 4 + 0] = (uint32_t)lo;
+        gmap_tab[total * 4 + 1] = (uint32_t)len;
+        gmap_tab[total * 4 + 2] = (uint32_t)(off >> 2);
+        gmap_tab[total * 4 + 3] = (uint32_t)(lo >> 32);
+        off += (len + 255) & ~255ull;
+        total++;
+    }
+    if (!total) return;
+    if (m && ENV("LARECOMP_LOG_GFAST")) {  // (debug) =<shader code address hex>: that shader's first tables
         static int nlog;
         if (st.program->stages[5].code_addr == strtoull(ENV("LARECOMP_LOG_GFAST"), NULL, 16) && nlog++ < 40) {
             LOG("[gfast] cs %llx: %d ranges, %llu KB:", (unsigned long long)st.program->stages[5].code_addr, m, (unsigned long long)(off >> 10));
@@ -5865,19 +5893,18 @@ static void gfast_prepare(VkCommandBuffer cb) {
             LOG("\n");
         }
     }
-    gmem_copy(cb, gfast_buf, cp, m, false);
+    if (m) gmem_copy(cb, gfast_buf, cp, m, false);
     vk_full_barrier(cb);
-    if (gfast_stores && gmerge_init()) {  // (the twin: see gfast_back)
+    if (m && gfast_stores && gmerge_init()) {  // (the twin: see gfast_back)
         VkBufferCopy tw[16];
         for (int i = 0; i < m; i++) tw[i] = (VkBufferCopy){cp[i].dstOffset, cp[i].dstOffset, cp[i].size};
         rec_CmdCopyBuffer(cb, gfast_buf, gorig_buf, (uint32_t)m, tw);
         vk_full_barrier(cb);
     }
-    gmap_tab[GMAP_MAX * 4] = (uint32_t)m;
-    memcpy(gfast_cp, cp, (size_t)m * sizeof cp[0]);
-    gfast_n = m;
-    gfast_back_n = 0;
-    for (int i = 0; i < 16; i++) {  // each bound buffer's exact bytes, from wherever its merged range sits
+    gmap_tab[GMAP_MAX * 4] = (uint32_t)total;
+    if (m) memcpy(gfast_cp, cp, (size_t)m * sizeof cp[0]);
+    gfast_n = total;
+    for (int i = 0; m && i < 16; i++) {  // each bound buffer's exact bytes, from wherever its merged range sits
         uint64_t a = st.sbuf[5][i].addr, sz = st.sbuf[5][i].size;
         if (!a || !sz || a < gwin_base || a - gwin_base + sz > gmem_size) continue;
         uint64_t h = a - gwin_base;
@@ -5892,6 +5919,7 @@ static void gfast_prepare(VkCommandBuffer cb) {
 // After a storing dispatch: its ranges back to the heap (before anything else reads them: draws, the CPU after the fence).
 static void gfast_finish(VkCommandBuffer cb) {
     if (!gfast_n) return;
+    if (!gfast_back_n) { gfast_n = 0; return; }
     for (int i = 0; i < gfast_back_n; i++)
         gw_note("compute copy back", gwin_base + gfast_back[i].dstOffset, gfast_back[i].size, st.program ? st.program->stages[5].code_addr : 0);
     vk_full_barrier(cb);
@@ -8349,7 +8377,9 @@ static void draw_(CmdRec *r, bool indexed) {
         }
         if (g_ind_gpu && ind_ok && nruns == 1) {  // (indirect: instance count etc. written by the GPU - culling)
             rec_CmdDrawIndirect(cb, gmem_buf, g_ind_off, 1, g_ind_stride, indexed);
-        } else if (!use_index) rec_CmdDraw(cb, count, run_n[ri], first, base_inst + run_at[ri]);
+        } else if (!use_index) {
+            rec_CmdDraw(cb, count, run_n[ri], first, base_inst + run_at[ri]);
+        }
         else rec_CmdDrawIndexed(cb, icount, run_n[ri], 0, base_vertex, base_inst + run_at[ri]);
     }
     dl_note("draw vs %llx fs %llx%s xfb %d", (unsigned long long)st.program->stages[0].code_addr,
