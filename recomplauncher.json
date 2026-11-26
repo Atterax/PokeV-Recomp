@@ -1,0 +1,337 @@
+{
+  "$schema": "https://recomplauncher.com/schema/recomplauncher.json",
+  "format": 1,
+  "repo": "didslima/PokeV-Recomp",
+  "inputs": [
+    {
+      "id": "game",
+      "label": "Your Pokémon Violet 4.0.0 copy (.nsp, .xci, or extracted folder with exefs and romfs).",
+      "formats": [
+        { "type": "folder" },
+        { "type": "file", "extensions": ["nsp", "xci"], "requires": ["keys"] }
+      ]
+    },
+    {
+      "id": "update",
+      "label": "Pokémon Violet 4.0.0 update (.nsp or .xci), if separate from the base game.",
+      "role": "update",
+      "optional": true,
+      "formats": [
+        { "type": "file", "extensions": ["nsp", "xci"], "requires": ["keys"] }
+      ]
+    },
+    {
+      "id": "keys",
+      "label": "Nintendo Switch prod.keys",
+      "role": "key",
+      "shared": "switch.prod-keys"
+    }
+  ],
+  "prepare": {
+    "program": ["PokeV-Recomp.exe", "AppRun"],
+    "args": ["--prepare", "--game={input:game}", "--update={input:update}", "--keys={input:keys}"],
+    "env": {
+      "LARECOMP_DATA_ROOT": "{data}"
+    },
+    "label": "Importing game files and compiling native code",
+    "done": ["{data}/extracted/exefs/main"],
+    "keeps_copy": true
+  },
+  "start": {
+    "program": ["PokeV-Recomp.exe", "AppRun"],
+    "args": ["--play"],
+    "env": {
+      "LARECOMP_DATA_ROOT": "{data}"
+    }
+  },
+  "saves": ["{data}/save/save_0"],
+  "folders": {
+    "game": [{ "path": "{data}" }],
+    "logs": [{ "path": "{data}/logs" }],
+    "screenshots": [{ "path": "{data}/screenshots" }],
+    "mods": [{ "path": "{data}/mods" }]
+  },
+  "system": {
+    "windows": {
+      "version": "10",
+      "graphics": { "vulkan": "1.3" }
+    },
+    "linux": {
+      "glibc": "2.35",
+      "graphics": { "vulkan": "1.3" }
+    }
+  },
+  "config": [
+    {
+      "id": "main",
+      "format": "ini",
+      "file": [{ "path": "{data}/larecomp.ini" }],
+      "new": {
+        "aspect": "original",
+        "fullscreen": "0",
+        "volume": "1.00",
+        "reverb": "1",
+        "movie_audio": "1",
+        "show_fps": "0",
+        "fps60": "1",
+        "fps60_lock": "1",
+        "aniso16": "1",
+        "dynamic_res": "off",
+        "tex_hd": "0",
+        "shadow_resolution": "1",
+        "shadow_sharpness": "1",
+        "ambient_occlusion": "0",
+        "upscaler": "bilinear",
+        "antialias": "off",
+        "resolution": "1x",
+        "video_recommended": "auto",
+        "inv_keys": "1",
+        "dpad_move": "0",
+        "move_360": "0",
+        "blur_removal": "0",
+        "prompts": "auto",
+        "language": "auto",
+        "bind_pad_a": "south",
+        "bind_pad_b": "east",
+        "bind_pad_x": "west",
+        "bind_pad_y": "north",
+        "bind_key_a": "Return",
+        "bind_key_b": "Backspace",
+        "bind_key_plus": "P",
+        "bind_key_minus": "M"
+      }
+    }
+  ],
+  "settings": [
+    {
+      "id": "fullscreen",
+      "label": "Fullscreen",
+      "group": "Display",
+      "help": "Start in fullscreen mode instead of a window.",
+      "choices": [
+        { "label": "Windowed", "set": { "fullscreen": "0" } },
+        { "label": "Fullscreen", "set": { "fullscreen": "1" } }
+      ],
+      "defaults": { "fullscreen": "0" }
+    },
+    {
+      "id": "aspect",
+      "label": "Aspect Ratio",
+      "group": "Display",
+      "help": "Keep the Switch's 16:9 ratio or fill your window (supports ultrawide).",
+      "choices": [
+        { "label": "16:9 (Original)", "set": { "aspect": "original" } },
+        { "label": "Fill window (Ultrawide)", "set": { "aspect": "unlocked" } }
+      ],
+      "defaults": { "aspect": "original" }
+    },
+    {
+      "id": "fps60",
+      "label": "Frame Rate",
+      "group": "Display",
+      "help": "Run at 30 fps like the Switch or unlock to 60 fps.",
+      "choices": [
+        { "label": "30 fps", "set": { "fps60": "0" } },
+        { "label": "60 fps", "set": { "fps60": "1" } }
+      ],
+      "defaults": { "fps60": "1" }
+    },
+    {
+      "id": "present_mode",
+      "label": "V-Sync",
+      "group": "Display",
+      "help": "Wait for the display refresh to prevent tearing, or use low-latency mailbox mode.",
+      "choices": [
+        { "label": "Off (Mailbox)", "set": { "present_mode": "mailbox" } },
+        { "label": "On (FIFO)", "set": { "present_mode": "fifo" } }
+      ],
+      "defaults": { "present_mode": "mailbox" }
+    },
+    {
+      "id": "show_fps",
+      "label": "Show FPS",
+      "group": "Display",
+      "help": "Show the frame rate counter in the corner.",
+      "choices": [
+        { "label": "Off", "set": { "show_fps": "0" } },
+        { "label": "On", "set": { "show_fps": "1" } }
+      ],
+      "defaults": { "show_fps": "0" }
+    },
+    {
+      "id": "resolution",
+      "label": "Internal Resolution",
+      "group": "Rendering",
+      "help": "How sharp the 3D image is rendered (1x is the Switch's 1080p).",
+      "choices": [
+        { "label": "Auto", "set": { "resolution": "auto" } },
+        { "label": "25%", "set": { "resolution": "25%" } },
+        { "label": "50%", "set": { "resolution": "50%" } },
+        { "label": "75%", "set": { "resolution": "75%" } },
+        { "label": "Match display", "set": { "resolution": "match" } },
+        { "label": "Dynamic", "set": { "resolution": "dynamic" } },
+        { "label": "1x (1080p)", "set": { "resolution": "1x" } },
+        { "label": "1.5x", "set": { "resolution": "1.5x" } },
+        { "label": "2x (2160p)", "set": { "resolution": "2x" } },
+        { "label": "3x", "set": { "resolution": "3x" } },
+        { "label": "4x", "set": { "resolution": "4x" } }
+      ],
+      "defaults": { "resolution": "1x" }
+    },
+    {
+      "id": "upscaler",
+      "label": "Upscaler",
+      "group": "Rendering",
+      "help": "How the image is scaled up when rendering below display resolution.",
+      "choices": [
+        { "label": "Auto", "set": { "upscaler": "auto" } },
+        { "label": "Bilinear", "set": { "upscaler": "bilinear" } },
+        { "label": "AMD FSR 1", "set": { "upscaler": "fsr1" } },
+        { "label": "Intel XeSS", "set": { "upscaler": "xess" } }
+      ],
+      "defaults": { "upscaler": "bilinear" }
+    },
+    {
+      "id": "xess_quality",
+      "label": "XeSS Quality",
+      "group": "Rendering",
+      "help": "Intel XeSS 3.0.2 quality preset when Intel XeSS upscaling is active.",
+      "when": { "upscaler": "xess" },
+      "choices": [
+        { "label": "Ultra Performance", "set": { "xess_quality": "0" } },
+        { "label": "Performance", "set": { "xess_quality": "1" } },
+        { "label": "Balanced", "set": { "xess_quality": "2" } },
+        { "label": "Quality", "set": { "xess_quality": "3" } },
+        { "label": "Ultra Quality", "set": { "xess_quality": "4" } },
+        { "label": "Native AA", "set": { "xess_quality": "5" } }
+      ],
+      "defaults": { "xess_quality": "3" }
+    },
+    {
+      "id": "antialias",
+      "label": "Anti-aliasing",
+      "group": "Rendering",
+      "help": "Smooths jagged edges before scaling to the window.",
+      "choices": [
+        { "label": "Off", "set": { "antialias": "off" } },
+        { "label": "SMAA", "set": { "antialias": "smaa" } }
+      ],
+      "defaults": { "antialias": "off" }
+    },
+    {
+      "id": "aniso16",
+      "label": "Texture Filtering",
+      "group": "Rendering",
+      "advanced": true,
+      "help": "16x anisotropic filtering keeps ground textures sharp at an angle.",
+      "choices": [
+        { "label": "Standard", "set": { "aniso16": "0" } },
+        { "label": "16x Anisotropic", "set": { "aniso16": "1" } }
+      ],
+      "defaults": { "aniso16": "1" }
+    },
+    {
+      "id": "shadow_resolution",
+      "label": "Shadow Resolution",
+      "group": "Rendering",
+      "advanced": true,
+      "help": "Higher values make shadows sharper.",
+      "choices": [
+        { "label": "1x (Original)", "set": { "shadow_resolution": "1" } },
+        { "label": "2x", "set": { "shadow_resolution": "2" } },
+        { "label": "3x", "set": { "shadow_resolution": "3" } },
+        { "label": "4x", "set": { "shadow_resolution": "4" } }
+      ],
+      "defaults": { "shadow_resolution": "1" }
+    },
+    {
+      "id": "ambient_occlusion",
+      "label": "Ambient Occlusion",
+      "group": "Rendering",
+      "advanced": true,
+      "help": "Adds soft contact shadows in corners and under objects.",
+      "choices": [
+        { "label": "Off", "set": { "ambient_occlusion": "0" } },
+        { "label": "Low", "set": { "ambient_occlusion": "1" } },
+        { "label": "Medium", "set": { "ambient_occlusion": "2" } },
+        { "label": "High", "set": { "ambient_occlusion": "3" } }
+      ],
+      "defaults": { "ambient_occlusion": "0" }
+    },
+    {
+      "id": "indirect_light",
+      "label": "Indirect Light",
+      "group": "Rendering",
+      "advanced": true,
+      "help": "Screen-space global illumination for bounced lighting.",
+      "choices": [
+        { "label": "Off", "set": { "indirect_light": "0" } },
+        { "label": "Low", "set": { "indirect_light": "1" } },
+        { "label": "Medium", "set": { "indirect_light": "2" } },
+        { "label": "High", "set": { "indirect_light": "3" } }
+      ],
+      "defaults": { "indirect_light": "0" }
+    },
+    {
+      "id": "volume",
+      "label": "Master Volume",
+      "group": "Sound",
+      "help": "Overall game audio volume.",
+      "slider": { "key": "volume", "min": 0.0, "max": 2.0, "step": 0.05, "format": "%.2f" },
+      "defaults": { "volume": "1.00" }
+    },
+    {
+      "id": "reverb",
+      "label": "Reverb",
+      "group": "Sound",
+      "help": "Environmental audio reverb effects.",
+      "choices": [
+        { "label": "Off", "set": { "reverb": "0" } },
+        { "label": "On", "set": { "reverb": "1" } }
+      ],
+      "defaults": { "reverb": "1" }
+    },
+    {
+      "id": "language",
+      "label": "Game Language",
+      "group": "Game",
+      "help": "In-game text language.",
+      "choices": [
+        { "label": "Auto", "set": { "language": "auto" } },
+        { "label": "English", "set": { "language": "en-US" } },
+        { "label": "Japanese", "set": { "language": "ja" } },
+        { "label": "Spanish", "set": { "language": "es" } },
+        { "label": "French", "set": { "language": "fr" } },
+        { "label": "German", "set": { "language": "de" } },
+        { "label": "Italian", "set": { "language": "it" } },
+        { "label": "Dutch", "set": { "language": "nl" } },
+        { "label": "Russian", "set": { "language": "ru" } },
+        { "label": "Korean", "set": { "language": "ko" } },
+        { "label": "Chinese (Simplified)", "set": { "language": "zh-Hans" } },
+        { "label": "Chinese (Traditional)", "set": { "language": "zh-Hant" } }
+      ],
+      "defaults": { "language": "auto" }
+    },
+    {
+      "id": "prompts",
+      "label": "Button Prompts",
+      "group": "Game",
+      "help": "Which controller or keyboard icons are shown in-game.",
+      "choices": [
+        { "label": "Auto", "set": { "prompts": "auto" } },
+        { "label": "Nintendo", "set": { "prompts": "nintendo" } },
+        { "label": "Xbox", "set": { "prompts": "xbox" } },
+        { "label": "PlayStation", "set": { "prompts": "playstation" } },
+        { "label": "Keyboard", "set": { "prompts": "keyboard" } },
+        { "label": "Steam Deck", "set": { "prompts": "steamdeck" } }
+      ],
+      "defaults": { "prompts": "auto" }
+    }
+  ],
+  "actions": [
+    { "id": "open_logs", "label": "Open Logs Folder", "open": "logs" },
+    { "id": "open_mods", "label": "Open Mods Folder", "open": "mods" },
+    { "id": "open_screenshots", "label": "Open Screenshots Folder", "open": "screenshots" },
+    { "id": "clear_cache", "label": "Clear Shader Cache", "clear": "game/cache" }
+  ]
+}

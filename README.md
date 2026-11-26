@@ -2,7 +2,7 @@
 
 <img src="docs/icon/icon_1024.png" alt="PokeV-Recomp icon" width="140">
 
-<a href="https://recomplauncher.com/game/pokev-recomp"><img src="https://recomplauncher.com/assets/press/launcher/badge-dark.svg" alt="Get it on RecompLauncher" height="56"></a>
+<a href="https://recomplauncher.com"><picture><source media="(prefers-color-scheme: dark)" srcset="https://recomplauncher.com/assets/press/launcher/badge-light.svg"><img alt="Get it on RecompLauncher" src="https://recomplauncher.com/assets/press/launcher/badge-dark.svg" height="48"></picture></a>
 
 # PokeV-Recomp (SV Recomp)
 

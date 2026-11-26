@@ -221,9 +221,16 @@ static bool pointer_root(const char *home, char *out, size_t n) {
     return true;
 }
 
-bool rt_data_root_early(char *out, size_t n) {
+static const char *data_root_env(void) {
     const char *env = getenv("LARECOMP_DATA_ROOT");
-    if (env && *env) return (size_t)snprintf(out, n, "%s", env) < n;
+    if (env && *env) return env;
+    env = getenv("RECOMPLAUNCHER_DATA");
+    return env && *env ? env : NULL;
+}
+
+bool rt_data_root_early(char *out, size_t n) {
+    const char *env = data_root_env();
+    if (env) return (size_t)snprintf(out, n, "%s", env) < n;
     if (is_dir("extracted")) return false;  // (dev mode)
     char home[1024];
     default_home(home, sizeof home);
@@ -296,8 +303,8 @@ void rt_paths_init(void) {
     exe_dir(g_exe_dir, sizeof g_exe_dir);
     default_home(g_home, sizeof g_home);
     char root[1024];
-    const char *env = getenv("LARECOMP_DATA_ROOT");
-    if (env && *env) snprintf(root, sizeof root, "%s", env);
+    const char *env = data_root_env();
+    if (env) snprintf(root, sizeof root, "%s", env);
     else if (is_dir("extracted")) snprintf(root, sizeof root, "%s", g_start), g_dev = true;  // dev / portable: as before
     else {
         snprintf(root, sizeof root, "%s", g_home);
@@ -501,6 +508,8 @@ unsigned long long rt_game_files_size(const char *game_dir) {
 const char *rt_data_root_fixed(void) {
     const char *env = getenv("LARECOMP_DATA_ROOT");
     if (env && *env) return "Set by LARECOMP_DATA_ROOT.";
+    env = getenv("RECOMPLAUNCHER_DATA");
+    if (env && *env) return "Set by RECOMPLAUNCHER_DATA.";
     if (g_dev) return "A source checkout uses its own folder.";
     return NULL;
 }

@@ -83,6 +83,7 @@ cp third_party/fonts/BIZUDPGothic/OFL.txt "$D/BIZUDPGothic-OFL.txt"
 cp third_party/fonts/DejaVu/DejaVuSans.ttf third_party/fonts/DejaVu/DejaVuSans-Bold.ttf "$D/"  # (last-resort fonts)
 cp third_party/fonts/DejaVu/LICENSE "$D/DejaVu-LICENSE.txt"
 cp README.md LICENSE "$D/"  # (licenses and source links of the bundled components: README "License")
+cp recomplauncher.json "$APPDIR/recomplauncher.json"
 [ -f README.pt-BR.md ] && cp README.pt-BR.md "$D/"
 mkdir -p "$D/docs" && cp docs/XBOX-ATTACK-LAYOUT.md "$D/docs/"
 cp tools/za/za-default.ini "$D/za-default.ini"  # (not larecomp.ini: the data folder holds the player's own)

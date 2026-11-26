@@ -117,7 +117,7 @@ cp runtime/cpu.h runtime/simd.h runtime/simd_fp.h runtime/gamelib.h tools/gameli
 cp docs/icon/icon_1024.png "$D/icon.png"
 cp third_party/fonts/Baloo2/Baloo2-SemiBold.ttf "$D/"
 cp third_party/fonts/Baloo2/OFL.txt "$D/Baloo2-OFL.txt"
-cp README.md LICENSE "$D/"
+cp README.md LICENSE recomplauncher.json "$D/"
 mkdir -p "$D/docs"
 cp docs/XBOX-ATTACK-LAYOUT.md "$D/docs/"
 [ -f README.pt-BR.md ] && cp README.pt-BR.md "$D/"

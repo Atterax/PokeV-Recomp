@@ -36,6 +36,7 @@
 extern "C" {
 #include "platform.h"
 #include "paths.h"
+#include "path_overlap.h"
 #include "game_identity.h"
 #include "gamebuild.h"
 #include "gamelib.h"
@@ -805,11 +806,24 @@ static std::atomic<float> g_build_frac{-1};  // -1: not building
 static std::atomic<bool> g_cancel_build{false};  // (the Play page's Cancel while compiling)
 static bool build_cancelled(void) { return g_cancel_build.load(); }
 static bool g_copy_skipped;                  // (only the game code to build: the bar is all of that)
+static bool g_prep_stdout_progress = false;
+static double g_prep_base = 0.0;
 static void setup_progress(uint64_t done, uint64_t) { g_done = g_phase_base + done; }
 static void build_progress(double f, const char *step) {
     g_build_frac = (float)f;
     static const char *last;
     if (step != last) last = step, set_job(step);
+    if (g_prep_stdout_progress) {
+        static const char *last_prep_step = NULL;
+        static double last_prep_f = -1.0;
+        double overall = g_prep_base + (0.93 - g_prep_base) * (f < 0 ? 0 : f > 1 ? 1 : f);
+        if (step != last_prep_step || overall - last_prep_f >= 0.02 || f >= 1.0) {
+            last_prep_step = step;
+            last_prep_f = overall;
+            printf("progress %.2f %s\n", overall, step && *step ? step : "Building game code...");
+            fflush(stdout);
+        }
+    }
 }
 static float extract_progress(void) {
     unsigned long long t = g_total, d = g_done;
@@ -2277,7 +2291,8 @@ extern "C" void launcher_run(const char *root) {
     settings_load();
     lang_update();
     static bool update_checked;  // (once per launch, not again after a "Title screen" reboot)
-    if (!update_checked && !getenv("LARECOMP_NO_UPDATE_CHECK")) {
+    const char *rl = getenv("RECOMPLAUNCHER");
+    if (!update_checked && !getenv("LARECOMP_NO_UPDATE_CHECK") && !(rl && !strcmp(rl, "1"))) {
         update_checked = true;
         pthread_t t;
         if (pthread_create(&t, NULL, update_thread, NULL) == 0) pthread_detach(t);
@@ -3320,4 +3335,138 @@ extern "C" void launcher_run(const char *root) {
     ImGui::DestroyContext(ctx);
     ImGui::SetCurrentContext(prev_ctx);
     g_start_screen = 0;
+}
+
+// ------------------------------------------------------------------ windowless --prepare (RecompLauncher setup step)
+extern "C" int launcher_prepare(const char *root, const char *game_path, const char *update_path,
+                                const char *keys_path, const char *title_keys_path) {
+    g_root = root ? root : "extracted";
+    settings_load();
+    char foreign[160] = "";
+    if (rt_game_files_foreign(g_root.c_str(), foreign, sizeof foreign)) {
+        fprintf(stderr, "The data folder holds %s's files from another app; refusing to overwrite them.\n", foreign);
+        return 1;
+    }
+    if (check_game_files(g_root).empty()) {
+        if (prompts_wanted()) {
+            printf("progress 0.94 Drawing controller button icons...\n");
+            fflush(stdout);
+            make_prompts(true);
+        }
+        printf("progress 1 Already built\n");
+        fflush(stdout);
+        return 0;
+    }
+    bool copied_ready = check_copied_files(g_root).empty();
+    g_prep_base = copied_ready ? 0.0 : 0.25;
+    if (!copied_ready) {
+        if (!game_path || !*game_path) {
+            fprintf(stderr, "No game path provided. Select your Pokémon Violet 4.0.0 copy or pass --game=<path>.\n");
+            return 1;
+        }
+        printf("progress 0.01 Checking game files...\n");
+        fflush(stdout);
+        if (is_dir(game_path)) {
+            std::string exefs, romfs;
+            bool unusable = false;
+            find_game(game_path, 0, exefs, romfs, unusable);
+            if (!exefs.empty() && !romfs.empty()) {
+                if (!build_id_ok(exefs + "/main")) {
+                    fprintf(stderr, "%s\n", build_id_detail(exefs + "/main").c_str());
+                    return 1;
+                }
+                if (path_overlaps_dest(game_path, g_root.c_str()) || path_overlaps_dest(exefs.c_str(), g_root.c_str()) ||
+                    path_overlaps_dest(romfs.c_str(), g_root.c_str())) {
+                    fprintf(stderr, "Refusing to prepare: the source folder overlaps the data folder (%s).\n",
+                            g_root.c_str());
+                    return 1;
+                }
+                rt_remove_game_files(g_root.c_str());
+                mkdir(g_root.c_str(), 0755);
+                printf("progress 0.05 Copying game files...\n");
+                fflush(stdout);
+                if (!romfs_copy_tree(exefs.c_str(), (g_root + "/exefs").c_str(), NULL) ||
+                    !romfs_copy_tree(romfs.c_str(), (g_root + "/romfs").c_str(), NULL)) {
+                    fprintf(stderr, "Failed to copy exefs/romfs into the data folder.\n");
+                    return 1;
+                }
+            } else {
+                std::vector<std::string> pkgs;
+                int compressed = 0;
+                find_packages(game_path, 0, pkgs, compressed);
+                if (pkgs.empty()) {
+                    fprintf(stderr, "%s\n",
+                            compressed ? "Your dump is compressed (.nsz / .xcz): decompress it to .nsp / .xci first."
+                                       : "No Pokémon Violet game files (.nsp, .xci, or exefs+romfs) found in that folder.");
+                    return 1;
+                }
+                std::string bad, keys = (keys_path && *keys_path) ? keys_path : find_keys(game_path, &bad);
+                if (keys.empty()) {
+                    fprintf(stderr, "%s\n",
+                            bad.empty() ? "prod.keys not found. Select your Switch prod.keys in Easy Setup or pass --keys=<path>."
+                                        : ("\"" + bad + "\" is not a valid prod.keys (missing header_key).").c_str());
+                    return 1;
+                }
+                std::string tkeys = (title_keys_path && *title_keys_path) ? title_keys_path : find_title_keys(game_path, keys);
+                std::string err;
+                if (path_overlaps_dest(game_path, g_root.c_str())) {
+                    fprintf(stderr, "Refusing to prepare: the source folder overlaps the data folder (%s).\n",
+                            g_root.c_str());
+                    return 1;
+                }
+                rt_remove_game_files(g_root.c_str());
+                mkdir(g_root.c_str(), 0755);
+                printf("progress 0.05 Importing game packages...\n");
+                fflush(stdout);
+                if (!import_packages(pkgs, keys, tkeys, err)) {
+                    fprintf(stderr, "%s\n", err.empty() ? "Failed to import game packages." : err.c_str());
+                    return 1;
+                }
+            }
+        } else {
+            std::vector<std::string> pkgs = {game_path};
+            if (update_path && *update_path) pkgs.push_back(update_path);
+            std::string dir = game_path;
+            size_t slash = dir.find_last_of("/\\");
+            dir = slash != std::string::npos ? dir.substr(0, slash) : ".";
+            std::string bad, keys = (keys_path && *keys_path) ? keys_path : find_keys(dir, &bad);
+            if (keys.empty()) {
+                fprintf(stderr, "%s\n",
+                        bad.empty() ? "prod.keys not found. Select your Switch prod.keys in Easy Setup or pass --keys=<path>."
+                                    : ("\"" + bad + "\" is not a valid prod.keys (missing header_key).").c_str());
+                return 1;
+            }
+            std::string tkeys = (title_keys_path && *title_keys_path) ? title_keys_path : find_title_keys(dir, keys);
+            std::string err;
+            rt_remove_game_files(g_root.c_str());
+            mkdir(g_root.c_str(), 0755);
+            printf("progress 0.05 Importing game packages...\n");
+            fflush(stdout);
+            if (!import_packages(pkgs, keys, tkeys, err)) {
+                fprintf(stderr, "%s\n", err.empty() ? "Failed to import game packages." : err.c_str());
+                return 1;
+            }
+        }
+        if (!build_id_ok(g_root + "/exefs/main")) {
+            fprintf(stderr, "%s\n", build_id_detail(g_root + "/exefs/main").c_str());
+            return 1;
+        }
+    }
+    printf("progress %.2f Building game code...\n", g_prep_base);
+    fflush(stdout);
+    g_prep_stdout_progress = true;
+    bool built = build_game_code();
+    g_prep_stdout_progress = false;
+    if (!built) {
+        fprintf(stderr, "%s\n", !g_fail_detail.empty() ? g_fail_detail.c_str() : "Failed to build game code.");
+        return 1;
+    }
+    if (prompts_wanted()) {
+        printf("progress 0.94 Drawing controller button icons...\n");
+        fflush(stdout);
+        make_prompts(true);
+    }
+    printf("progress 1 Ready\n");
+    fflush(stdout);
+    return 0;
 }
