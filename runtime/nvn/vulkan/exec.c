@@ -2321,6 +2321,7 @@ typedef struct {
     bool reuse;                 // set reuse (stage_set): some uniform buffers are dynamic, sets are kept while their contents repeat
     struct SetCache *scache[9][2]; // stage_set's last set per set index, per context (exec.c NCTX: the render thread's and
                                    // each shadow worker part's - from its own pools)
+    _Atomic uint64_t code_h[2];  // its stages' code hashes (shader_stage_hash), at its first draw: issue #22's workaround
 } Prog;
 static void sess_put_masked(Prog *p);
 
@@ -7658,6 +7659,160 @@ static bool wait_built_(_Atomic int *state, const CmdRec *r, bool indexed, bool 
     }
     return atomic_load(state) == 1;
 }
+// ================================================================== issue #22: Terastallized Water moves (NVIDIA)
+// What: a Terastallized Water-type move's effect (Kyogre's Water Spout) hung the GPU on NVIDIA (RTX 5070 Ti, driver
+// 620.73.04, Linux: "GPU did not finish submission N within 10 s", kernel Xid 109 CTX SWITCH TIMEOUT) on the effect's
+// first frame. The hang needs one draw, "E": a soft-particle billboard (vertex shader 09c1280fee686904, fragment shader
+// 55b596e702185e46; a 4-vertex strip, 1-5 instances, into a 960x540 pass). Left out, nothing hangs (H); drawn with the
+// vertex shader of the pass's draw before it, "D" (2aadd88fa6502c59: the same fragment shader, the same interface,
+// inputs and compiler constants - on the CPU, D's code gives E's own outputs from E's inputs), nothing hangs either
+// (K3, K4, and K5: E otherwise exactly as the game draws it - its vkCmdDraw, parameters, scissor and fragment shader -
+// 219 of 219 draws of E, no timeout, no Xid). Why E's own compiled vertex shader hangs the GPU is not known.
+// So a draw of E is drawn with D's vertex stage (its code, compiler constants and control section) and everything else
+// E's: fragment shader, vertex streams, constant buffers, textures, keys, fixed-function state, draw command and
+// parameters - nothing else is touched. Its program is the one D draws with (the same code addresses and keys:
+// get_program finds D's), and so its pipeline (the same key) is D's: E's pipeline with D's vertex shader module, as in
+// the runs that validated it - the pipeline identity is part of the workaround.
+// D's vertex stage: a copy of the NvnShaderStage from D's last draw (the pass draws D before E) - plain data: the
+// code's and the control section's guest addresses and the constants' place, nothing of the game's NvnProgram kept -
+// its code hashed again at every use: the game loads a battle's shaders into new memory each time, and a copy whose
+// code is no longer D's is never used. Without a valid D (none drawn yet, its code gone, or no vertex + fragment
+// stage) E is drawn as the game asks, with a [vk] issue #22 line: never with another shader. The substitute's
+// program not built yet: the draw is skipped, as any draw whose program is building. Identified by code hashes
+// (shader_stage_hash: the code up to the end of its constants), not addresses (other addresses each battle), and a
+// vertex + fragment stage: other stage bits are let through - st.program is the bound stages' composite (st.comp,
+// CMD_BIND_PROGRAM), which keeps e.g. a compute program's stage from an earlier bind (stage_mask 0x23 on graphics
+// draws after a dispatch), and a draw is built from its vertex + fragment stages only. (v0.0.30's first build asked
+// for exactly vertex + fragment: in game both draws of E fell back on it - D's, in the same pass, most likely too -
+// were drawn with E's own shader, and the GPU stopped.)
+// The substitute NvnProgram is st.program for the rest of this one draw only: a per-thread copy (shadow workers
+// translate draws in parallel), and draw's caller puts the game's program back after every draw.
+// LARECOMP_ISSUE22_FIX=0: off - E drawn with its own vertex shader again (to reproduce the hang). The investigation and
+// its runs: docs/issue-22-gpu-hang.md.
+#define I22FIX_E_VH 0x09c1280fee686904ull
+#define I22FIX_E_FH 0x55b596e702185e46ull
+#define I22FIX_D_VH 0x2aadd88fa6502c59ull
+#define I22FIX_D_FH 0x55b596e702185e46ull
+enum { I22FIX_NONE, I22FIX_IS_D, I22FIX_SUB, I22FIX_NO_D, I22FIX_D_GONE, I22FIX_STAGES };
+// The decision (tools/test_issue22_fix.py), by the drawn program's stage hashes (vh / fh, 1: not hashable) and stage
+// mask: I22FIX_IS_D = D's draw, its vertex stage to keep; I22FIX_SUB = E, drawn with the kept stage (have_d; d_vh: that
+// stage's code hashed now); I22FIX_NO_D / _D_GONE / _STAGES = E, drawn as it is (no D kept yet / the kept stage's code
+// is no longer D's / no vertex or no fragment stage); I22FIX_NONE = anything else. Stage bits past vertex + fragment
+// (a composite's leftover compute, geometry or tessellation stage) don't count: draws build only those two.
+static int i22fix_decide(uint64_t vh, uint64_t fh, uint32_t stage_mask, bool have_d, uint64_t d_vh) {
+    bool e = vh == I22FIX_E_VH && fh == I22FIX_E_FH, d = vh == I22FIX_D_VH && fh == I22FIX_D_FH;
+    if (!e && !d) return I22FIX_NONE;
+    if ((stage_mask & 3) != 3) return e ? I22FIX_STAGES : I22FIX_NONE;  // (a vertex and a fragment stage; others ignored)
+    if (d) return I22FIX_IS_D;
+    if (!have_d) return I22FIX_NO_D;
+    if (d_vh != I22FIX_D_VH) return I22FIX_D_GONE;
+    return I22FIX_SUB;
+}
+// The substitute: E's program with D's vertex stage - E's fragment stage, stage mask and the rest as they are.
+static void i22fix_make(NvnProgram *out, const NvnProgram *e, const NvnShaderStage *d_vs) {
+    *out = *e;
+    out->stages[0] = *d_vs;
+}
+static const char *i22fix_why(int k) {
+    return k == I22FIX_NO_D ? "no draw of D (vs 2aadd88fa6502c59) seen yet this session"
+         : k == I22FIX_D_GONE ? "the vertex stage kept from D's draw no longer holds D's code"
+         : k == I22FIX_STAGES ? "the program has no vertex stage or no fragment stage"
+                              : "?";
+}
+// ---- end of the issue #22 decision
+
+static pthread_once_t i22fix_once = PTHREAD_ONCE_INIT;
+static bool i22fix_enabled;
+static void i22fix_init(void) {
+    const char *e = getenv("LARECOMP_ISSUE22_FIX");
+    i22fix_enabled = !e || strcmp(e, "0") != 0;
+    if (!i22fix_enabled) LOG("[vk] issue #22 workaround off (LARECOMP_ISSUE22_FIX=0): E drawn with its own vertex shader\n");
+}
+static bool i22fix_on(void) {
+    pthread_once(&i22fix_once, i22fix_init);
+    return i22fix_enabled;
+}
+// A program's stage hashes, once (its first draw; the same values from any thread: release / acquire on [0]).
+static void prog_code_hashes(Prog *p, const NvnProgram *np, uint64_t *vh, uint64_t *fh) {
+    uint64_t v = atomic_load_explicit(&p->code_h[0], memory_order_acquire);
+    if (v) {
+        *vh = v;
+        *fh = atomic_load_explicit(&p->code_h[1], memory_order_relaxed);
+        return;
+    }
+    v = shader_stage_hash(&np->stages[0]);
+    uint64_t f = shader_stage_hash(&np->stages[1]);
+    if (!v) v = 1;  // (no hashable code: never E or D - and not hashed again)
+    atomic_store_explicit(&p->code_h[1], f, memory_order_relaxed);
+    atomic_store_explicit(&p->code_h[0], v, memory_order_release);
+    *vh = v, *fh = f;
+}
+static pthread_mutex_t i22fix_lock = PTHREAD_MUTEX_INITIALIZER;
+static NvnShaderStage i22fix_d;  // (i22fix_lock) D's vertex stage, from its last draw: a copy
+static bool i22fix_have_d;       // (i22fix_lock)
+static uint64_t i22fix_d_frame;  // (i22fix_lock)
+static _Atomic uint64_t i22fix_subs, i22fix_kept;  // draws of E with D's vertex shader / as the game asks
+static __thread NvnProgram i22fix_prog;  // (this thread's draw of E: st.program until draw's caller puts the game's back)
+// (draw_, once the drawn program is found and built) D: its vertex stage kept. E: *prp and st.program become E's
+// program with D's vertex stage. Returns -1 (draw on), or the SKIP reason when the substitute's program is not built.
+// Anything else, or off: -1 at once, nothing done.
+static int i22fix_apply(Prog **prp, const CmdRec *r, bool indexed, ShaderKey *vkey, ShaderKey *fkey) {
+    if (!i22fix_on()) return -1;
+    uint64_t vh, fh;
+    prog_code_hashes(*prp, st.program, &vh, &fh);
+    if (vh != I22FIX_E_VH && vh != I22FIX_D_VH) return -1;  // (every other draw: one compare)
+    NvnShaderStage d;
+    pthread_mutex_lock(&i22fix_lock);
+    d = i22fix_d;
+    bool have_d = i22fix_have_d;
+    uint64_t d_frame = i22fix_d_frame;
+    pthread_mutex_unlock(&i22fix_lock);
+    bool is_e = vh == I22FIX_E_VH && fh == I22FIX_E_FH;
+    uint64_t d_vh = is_e && have_d ? shader_stage_hash(&d) : 0;  // (D's code must still be there)
+    int k = i22fix_decide(vh, fh, st.program->stage_mask, have_d, d_vh);
+    if (k == I22FIX_NONE) return -1;
+    if (k == I22FIX_IS_D) {
+        pthread_mutex_lock(&i22fix_lock);
+        bool first = !i22fix_have_d;
+        i22fix_d = st.program->stages[0];
+        i22fix_have_d = true;
+        i22fix_d_frame = vk_frame_counter();
+        pthread_mutex_unlock(&i22fix_lock);
+        if (first)  // (once a session: D's stage is kept again at each of its draws, silently)
+            LOG("[vk] issue #22: D's vertex shader (vs %016llx at %llx, fs %016llx, stage mask %#x) kept for draws of E, "
+                "frame %llu\n", (unsigned long long)vh, (unsigned long long)st.program->stages[0].code_addr,
+                (unsigned long long)fh, st.program->stage_mask, (unsigned long long)vk_frame_counter());
+        return -1;
+    }
+    if (k != I22FIX_SUB) {
+        uint64_t n = atomic_fetch_add(&i22fix_kept, 1) + 1;
+        if (n <= 20 || n % 1000 == 0)
+            LOG("[vk] issue #22: a draw of E (vs %016llx fs %016llx) drawn with its own vertex shader: %s (stage mask "
+                "%#x, %llu so far, frame %llu) - the GPU may stop on it (NVIDIA)\n", (unsigned long long)vh,
+                (unsigned long long)fh, i22fix_why(k), st.program->stage_mask, (unsigned long long)n,
+                (unsigned long long)vk_frame_counter());
+        return -1;
+    }
+    i22fix_make(&i22fix_prog, st.program, &d);
+    Prog *dp = get_program(&i22fix_prog, vkey, fkey);
+    if (!dp) {  // (not possible with a vertex + fragment program: drawn as the game asks)
+        atomic_fetch_add(&i22fix_kept, 1);
+        LOG("[vk] issue #22: a draw of E drawn with its own vertex shader: no program for D's vertex shader\n");
+        return -1;
+    }
+    if (!wait_built(&dp->state, r, indexed, false)) return atomic_load(&dp->state) == 2 ? SK_PROG_FAILED : SK_PROG_BUILDING;
+    *prp = dp;
+    st.program = &i22fix_prog;
+    uint64_t n = atomic_fetch_add(&i22fix_subs, 1) + 1;
+    if (n == 1 || n == 10 || n == 100 || n == 1000 || n % 10000 == 0)
+        LOG("[vk] issue #22 workaround: %llu draw(s) of E (vs %016llx fs %016llx) drawn with D's vertex shader (vs "
+            "%016llx at %llx, kept from D's draw at frame %llu), E's fragment shader, inputs, state and draw (%llu drawn "
+            "with their own; LARECOMP_ISSUE22_FIX=0: off), frame %llu\n", (unsigned long long)n, (unsigned long long)vh,
+            (unsigned long long)fh, (unsigned long long)d_vh, (unsigned long long)d.code_addr, (unsigned long long)d_frame,
+            (unsigned long long)atomic_load(&i22fix_kept), (unsigned long long)vk_frame_counter());
+    return -1;
+}
+// ---- end of issue #22
 // A draw into a reshaped (wider / taller than 16:9) pass at the uniform scale, centred: UI keeps its 16:9 layout.
 static void vp_box_16_9(void) {
     int pw, ph;
@@ -7698,7 +7853,9 @@ static void draw(CmdRec *r, bool indexed) {
                 (unsigned long long)xfb_size[0], (unsigned long long)xfb_addr[1], (unsigned long long)xfb_size[1],
                 (unsigned long long)xfb_addr[2], (unsigned long long)xfb_size[2]);
     }
-    draw_(r, indexed);
+    NvnProgram *bound = st.program;  // (issue #22: draw_ may draw E with a substitute program - i22fix_apply - the game's
+    draw_(r, indexed);               // program back after every draw, whatever draw_ did)
+    st.program = bound;
     if (g_vk.hdr && st.rt.color[0] && !st.color_state[0] && st.rt.color[0]->backend &&
         ((TexBackend *)st.rt.color[0]->backend)->presented)
         hdr_snapshot(st.rt.color[0]);  // (the game's picture in the image it shows, before the HUD over it)
@@ -7746,6 +7903,10 @@ static void draw_(CmdRec *r, bool indexed) {
         SKIP(!pr ? SK_NO_STAGES : atomic_load(&pr->state) == 2 ? SK_PROG_FAILED : SK_PROG_BUILDING);
         return;
     }
+    // Issue #22: E drawn with D's vertex shader (i22fix_apply) - pr and st.program become the substitute's for the rest
+    // of this draw; its program not built yet: skipped, as any draw whose program is building. Off: nothing.
+    int i22fix_skip = i22fix_apply(&pr, r, indexed, &vkey, &fkey);
+    if (i22fix_skip >= 0) { SKIP(i22fix_skip); return; }
     {   // Stretched-geometry guard: a vertex shader reading attributes past a one-attribute layout (position only) is
         // drawing with another draw's layout - its mesh spreads across the sky (Z-A: 36-byte vertices read as 12).
         // Skipped until the cause is found; LARECOMP_SKIP_BAD_LAYOUT=0 draws them.
