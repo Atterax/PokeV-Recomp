@@ -44,6 +44,7 @@ jobs:
             mingw-w64-ucrt-x86_64-binutils
             mingw-w64-ucrt-x86_64-sdl3
             mingw-w64-ucrt-x86_64-vulkan-devel
+            mingw-w64-ucrt-x86_64-vulkan-loader
             mingw-w64-ucrt-x86_64-shaderc
             mingw-w64-ucrt-x86_64-spirv-tools
             mingw-w64-ucrt-x86_64-pkgconf
@@ -163,8 +164,6 @@ jobs:
           PYTHONUTF8: "1"
         run: |
           set -euo pipefail
-          # Headless windows-2022 runners lack a GPU driver (vulkan-1.dll); install the loader for the unpacked smoke test only.
-          pacman -S --noconfirm --needed mingw-w64-ucrt-x86_64-vulkan-loader
           SCHEMA_URL="https://raw.githubusercontent.com/elripalda/RecompLauncher/7d8bc7a59d472402ada20e2fff2fbbf806e10797/docs/recomplauncher.schema.json"
           curl -fsSL "$SCHEMA_URL" -o "$RUNNER_TEMP/recomplauncher.schema.json"
           python -m venv "$RUNNER_TEMP/win-rl-venv"
