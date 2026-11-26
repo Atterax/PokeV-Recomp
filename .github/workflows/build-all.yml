@@ -163,6 +163,8 @@ jobs:
           PYTHONUTF8: "1"
         run: |
           set -euo pipefail
+          # Headless windows-2022 runners lack a GPU driver (vulkan-1.dll); install the loader for the unpacked smoke test only.
+          pacman -S --noconfirm --needed mingw-w64-ucrt-x86_64-vulkan-loader
           SCHEMA_URL="https://raw.githubusercontent.com/elripalda/RecompLauncher/7d8bc7a59d472402ada20e2fff2fbbf806e10797/docs/recomplauncher.schema.json"
           curl -fsSL "$SCHEMA_URL" -o "$RUNNER_TEMP/recomplauncher.schema.json"
           python -m venv "$RUNNER_TEMP/win-rl-venv"
@@ -230,10 +232,6 @@ jobs:
                   assert not non_vulkan_missing, f"Missing bundled DLLs in ZIP:\n{chr(10).join(non_vulkan_missing)}"
                   if any("vulkan-1" in m.lower() for m in missing):
                       import shutil
-                      subprocess.run(
-                          ["pacman", "-S", "--noconfirm", "--needed", "mingw-w64-ucrt-x86_64-vulkan-loader"],
-                          check=True,
-                      )
                       ucrt_bin = Path(shutil.which("clang")).parent
                       for cand in (ucrt_bin / "vulkan-1.dll", ucrt_bin / "libvulkan-1.dll"):
                           if cand.is_file():
