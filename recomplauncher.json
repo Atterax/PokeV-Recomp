@@ -28,7 +28,7 @@
     }
   ],
   "prepare": {
-    "program": ["PokeV-Recomp.exe", "PokeV-Recomp-linux-x86_64.AppImage"],
+    "program": ["PokeV-Recomp.exe", "AppRun"],
     "args": ["--prepare", "--game={input:game}", "--update={input:update}", "--keys={input:keys}"],
     "env": {
       "LARECOMP_DATA_ROOT": "{data}"
@@ -38,7 +38,7 @@
     "keeps_copy": true
   },
   "start": {
-    "program": ["PokeV-Recomp.exe", "PokeV-Recomp-linux-x86_64.AppImage"],
+    "program": ["PokeV-Recomp.exe", "AppRun"],
     "args": ["--play"],
     "env": {
       "LARECOMP_DATA_ROOT": "{data}"

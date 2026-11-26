@@ -36,6 +36,10 @@ def test_manifest_and_schema():
     assert data["prepare"]["keeps_copy"] is True
     assert data["prepare"]["done"] == ["{data}/extracted/exefs/main"]
     assert data["start"]["args"] == ["--play"]
+    # Windows ZIP: PokeV-Recomp.exe next to the manifest. Linux: the launcher unpacks the AppImage into a plain
+    # folder (squashfs-root layout) and runs its AppRun, which forwards to usr/bin/PokeV-Recomp.
+    for step in ("prepare", "start"):
+        assert data[step]["program"] == ["PokeV-Recomp.exe", "AppRun"], f"{step}.program"
     assert data["saves"] == ["{data}/save/save_0"]
 
     # External jsonschema CLI check if schema path is provided via RECOMPLAUNCHER_SCHEMA
@@ -74,6 +78,9 @@ def test_packaging_and_readme():
     assert "recomplauncher.json" in dist_win
     assert '"$APPDIR/recomplauncher.json"' in dist_linux
     assert '"$@"' in apprun
+    assert 'usr/bin/PokeV-Recomp' in apprun
+    assert 'cp tools/linux/AppRun "$APPDIR/"' in dist_linux
+    assert 'cp $B/PokeV-Recomp.exe $B/PokeV-Recomp.dll.a "$D/"' in dist_win
 
     for readme in ("README.md", "README.pt-BR.md"):
         text = (ROOT / readme).read_text(encoding="utf-8")
