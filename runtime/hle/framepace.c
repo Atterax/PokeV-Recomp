@@ -11,6 +11,7 @@
 //   LARECOMP_FRAMEPACE=1     hand the timer the vsyncs elapsed (default: the game's own value)
 //   LARECOMP_FRAME_STEPS_MAX maximum steps per frame (default 4: after a long stall the game doesn't jump ahead)
 //   LARECOMP_FORCE_STEPS=<n> (test) always n
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -263,4 +264,75 @@ void rt_sv_lua_frame_time(uint64_t L) {
         LOG("[pace] the scripts' frame time: %.6f s, now %.6f s\n", *(const double *)dt, v);
     }
     memcpy(dt, &v, sizeof v);
+}
+
+// Scarlet / Violet's sequence players (sv_patches.py _sv_timeline_time) - the catch's camera work, cutscenes, UI
+// animations - step in 30 fps frames, by slot 1 / (33.3 ms - 1 ns), and each track is a clip from one whole frame to
+// another (start <= t < end). At 30 fps they are only ever sampled at whole frames. At 60 fps they are also sampled half
+// way, and a clip one frame long - a moment, to a sequence authored at 30 fps: a camera cut - was then live twice, the
+// second time with the clips around it: on throwing a Poké Ball, the camera of the frame after the cut was the sum of
+// two cameras (~3 km away, looking up: a frame of sky, then of a lake far below), and the terrain streaming and the
+// grass, which follow the camera, dropped what was near the real one - the ground near the catch missing for a few
+// frames and its tall grass for ~0.6 s. A sample inside such a clip, between whole frames, plays to the clip's end
+// instead, as 30 fps would have next; the half frame gained is given back on the player's next sample (the frame after
+// the cut is held once), so the sequence keeps its length and its sound. The tracks (manager = player + 0xe0: [+0x50,
+// +0x58) and [+0x18, +0x20), 0x1d0 bytes each) point at FlatBuffers tables whose fields at vtable offsets 8 and 0xa
+// are the clip's first frame and its end (as 0x7000b845c0 reads them). LARECOMP_SV_TIMELINE_SNAP=0: as before;
+// LARECOMP_LOG_TIMELINE_SNAP=1 logs each one.
+static uint32_t fb_u32(uint64_t tbl, uint32_t voff, uint32_t def) {
+    uint64_t vt = tbl - (int64_t)*(const int32_t *)(uintptr_t)tbl;
+    uint16_t vsize = *(const uint16_t *)(uintptr_t)vt;
+    if (vsize <= voff) return def;
+    uint16_t o = *(const uint16_t *)(uintptr_t)(vt + voff);
+    return o ? *(const uint32_t *)(uintptr_t)(tbl + o) : def;
+}
+static float tl_moment_end(uint64_t player, float t) {  // (the end of a one-frame clip t is inside, between whole frames - or
+    // its start when t is only a float step's error past it; 0: none)
+    if (t == floorf(t)) return 0;
+    uint64_t mgr = player + 0xe0;
+    static const uint32_t lists[2][2] = {{0x50, 0x58}, {0x18, 0x20}};
+    for (int l = 0; l < 2; l++) {
+        uint64_t b = *(const uint64_t *)(uintptr_t)(mgr + lists[l][0]), e = *(const uint64_t *)(uintptr_t)(mgr + lists[l][1]);
+        if (!b || e < b || (e - b) / 0x1d0 > 4096) continue;
+        for (uint64_t tr = b; tr < e; tr += 0x1d0) {
+            uint64_t tbl = *(const uint64_t *)(uintptr_t)tr;
+            if (!tbl) continue;
+            uint32_t s0 = fb_u32(tbl, 8, 0), e0 = fb_u32(tbl, 0xa, 0);
+            if (e0 == s0 + 1 && (float)s0 <= t && t < (float)e0) return t - (float)s0 < 0.02f ? (float)s0 : (float)e0;
+        }
+    }
+    return 0;
+}
+float rt_sv_timeline_time(uint64_t player, float t, float step) {
+    static int on = -1, log;
+    if (on < 0) {
+        const char *e = ENV("LARECOMP_SV_TIMELINE_SNAP");
+        on = !e || atoi(e) != 0, log = ENV("LARECOMP_LOG_TIMELINE_SNAP") != NULL;
+        LOG("[pace] Scarlet / Violet one-frame sequence clips played as moments at 60 fps: %s\n", on ? "on" : "off (LARECOMP_SV_TIMELINE_SNAP=0)");
+    }
+    if (!on || !rt_pla_is_60fps()) return t;
+    // (the half frames owed, per player: a few players run at once; several threads may step them)
+    enum { N = 32 };
+    static struct { uint64_t player; float owed, last; } owe[N];
+    static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_lock(&lock);
+    int slot = -1;
+    for (int i = 0; i < N; i++) if (owe[i].player == player) { slot = i; break; }
+    if (slot >= 0 && owe[slot].owed > 0) {  // (gained last time: hold, at most back to where it was played)
+        float back = t - owe[slot].owed;
+        t = back > owe[slot].last ? back : owe[slot].last;
+        owe[slot].player = 0;
+    }
+    float end = tl_moment_end(player, t);
+    if (end > 0 && end <= t) t = end;  // (a float step's error past a whole frame: that frame)
+    else if (end > t) {
+        if (log) LOG("[pace] sequence player %llx: %.3f inside a one-frame clip, played at %.0f\n", (unsigned long long)player, t, end);
+        if (slot < 0) for (int i = 0; i < N; i++) if (!owe[i].player) { slot = i; break; }
+        if (slot < 0) slot = (int)(player >> 4) % N;
+        owe[slot].player = player, owe[slot].owed = end - t, owe[slot].last = end;
+        t = end;
+    }
+    pthread_mutex_unlock(&lock);
+    (void)step;
+    return t;
 }
