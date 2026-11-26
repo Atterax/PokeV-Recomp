@@ -92,7 +92,8 @@ One-time setup: `tools/setup_windows.ps1` (MSYS2 UCRT64 toolchain). Fast exe reb
 - Test runs read an ini with `fps60 = 0`: pass `LARECOMP_FPS=60`, or the fps line shows 30.
 - In game: F1 opens the menu, F9 dumps the next frame's passes, F10 saves a screenshot to `screenshots/`.
 - Kill switches for recent changes, to bisect visual bugs:
-  - `LARECOMP_VK_GMEM_FAST=0`, `LARECOMP_VK_GFAST_MERGE=0`, `LARECOMP_IB_GUARD=0`, `LARECOMP_VK_CLAMP_COLOR=1`,
+  - `LARECOMP_VK_GMEM_FAST=0` (with issue #27's uniform-buffer staging, unless `LARECOMP_VK_UBO_STAGE=1`),
+    `LARECOMP_VK_UBO_STAGE=0` (that staging alone), `LARECOMP_VK_GFAST_MERGE=0`, `LARECOMP_IB_GUARD=0`, `LARECOMP_VK_CLAMP_COLOR=1`,
     `LARECOMP_WARP_EMU=0`
   - `LARECOMP_VK_SUBMIT_EACH=1`, `LARECOMP_VK_BATCH_DRAWS=<n>`
   - `LARECOMP_RENDER_THREAD=0` (translate on the game thread), `LARECOMP_VK_RECORDER=0`, `LARECOMP_VK_NO_SET_REUSE=1`,

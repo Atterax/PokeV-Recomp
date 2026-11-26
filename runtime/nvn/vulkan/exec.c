@@ -5820,10 +5820,23 @@ static bool xm_back_reads(uint64_t a, uint64_t n) {
     return false;
 }
 
+// ---- gfast switches (tools/test_gfast_switches.py compiles these two from here)
+// The bound storage buffers' device-local copies: LARECOMP_VK_GMEM_FAST=1 / =0; unset: on, except on an integrated GPU
+// (there the heap import is not across PCIe: the copy and the table search only cost, 234 -> 97 ms on a Steam Deck).
+static bool gfast_storage_on(const char *fast, bool integrated) {
+    return fast ? atoi(fast) != 0 : !integrated;
+}
+// Uniform buffers outside the imported window staged into gfast_buf (issue #27): LARECOMP_VK_UBO_STAGE=1 / =0 decides;
+// unset, LARECOMP_VK_GMEM_FAST does when it is set (=0 turns the whole fast path off, this included); neither set: on,
+// on every GPU (integrated too: there only dispatches with such a uniform buffer pay for it). Values as atoi reads them.
+static bool gfast_ubo_stage_on(const char *fast, const char *stage) {
+    return stage ? atoi(stage) != 0 : fast ? atoi(fast) != 0 : true;
+}
+// ---- end of the gfast switches
 static void gfast_prepare(VkCommandBuffer cb) {
-    static int on = -1;
-    // (on an integrated GPU the heap import is not across PCIe: the copy and the table search only cost, 234 -> 97 ms on a Steam Deck)
-    if (on < 0) { const char *e = ENV("LARECOMP_VK_GMEM_FAST"); on = e ? atoi(e) != 0 : g_vk.props.deviceType != VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU; }
+    static int on = -1, ubo_on = -1;
+    if (on < 0) on = gfast_storage_on(ENV("LARECOMP_VK_GMEM_FAST"), g_vk.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU);
+    if (ubo_on < 0) ubo_on = gfast_ubo_stage_on(ENV("LARECOMP_VK_GMEM_FAST"), ENV("LARECOMP_VK_UBO_STAGE"));
     memset(gmap_tab, 0, sizeof gmap_tab);
     gfast_n = 0;
     gfast_back_n = 0;
@@ -5865,10 +5878,11 @@ static void gfast_prepare(VkCommandBuffer cb) {
     // Stage uniform buffers that live outside the imported gmem window (e.g. Scarlet & Violet's secondary VAMM pools
     // at 0x744... when gwin only covers 0x7676b00000+, or below gmem_lo on windowed iGPUs): compute shaders read
     // their cb0[33+i] pointers via LDG/GMR, which would otherwise fail the gmem bounds check and read zero.
+    // LARECOMP_VK_UBO_STAGE=0: off (gfast_ubo_stage_on).
     uint64_t g_lo = (gc_lazy || gmem_buf) ? gwin_base + (gc_lazy ? 0 : gmem_lo) : 0;
     uint64_t g_hi = (gc_lazy || gmem_buf) ? gwin_base + (gc_lazy ? gwin_max : gmem_lo + gmem_size) : 0;
     int total = m;
-    for (int i = 0; i < 16 && total < GMAP_MAX; i++) {
+    for (int i = 0; ubo_on && i < 16 && total < GMAP_MAX; i++) {
         uint64_t a = st.ubuf[5][i].addr, sz = st.ubuf[5][i].size;
         if (!a || !sz || sz > (1ull << 20)) continue;
         if (g_hi && a >= g_lo && a + sz <= g_hi && a + sz >= a) continue;
