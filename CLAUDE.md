@@ -98,6 +98,8 @@ One-time setup: `tools/setup_windows.ps1` (MSYS2 UCRT64 toolchain). Fast exe reb
   - `LARECOMP_RENDER_THREAD=0` (translate on the game thread), `LARECOMP_VK_RECORDER=0`, `LARECOMP_VK_NO_SET_REUSE=1`,
     `LARECOMP_VK_NO_KEY_MEMO=1`, `LARECOMP_VK_NO_CBUF_LEAN=1`
   - `LARECOMP_VK_PAGES_OUTSIDE=0`, `LARECOMP_VK_NO_SLOT_MEMO=1`
+  - `LARECOMP_ISSUE22_FIX=0`: issue #22's workaround off (draw E, the Terastallized Water moves' particle draw, with
+    its own vertex shader again: it stops NVIDIA GPUs; `docs/issue-22-gpu-hang.md`)
   - `LARECOMP_WATER_MODE=0` screen search, `1` SSPR, `2` planar (F1 > Reflection method); `LARECOMP_WATER_SKY_MATCH=0`
     (the reflection cube unscaled), `LARECOMP_WATER_CUBE=0` (the lighting's cube, not the water's)
 - Unit and fuzz tests exist (`tools/test_translate.sh`, `test_vk_pipelines.sh`, `test_lift.py`, `test_simd.py`,

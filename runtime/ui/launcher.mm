@@ -93,7 +93,7 @@ static const char *build_version(const uint8_t id[8]) { return game_identity_sup
 static bool build_is_za(const uint8_t id[8]) { return build_version(id) != NULL; }
 // The release tag this build is (also names the release files; Makefile / tools/bundle_macos.sh / make_dmg.sh read
 // it): PokeV-Recomp's v<major>.<minor>.<patch> (didslima/PokeV-Recomp releases).
-#define LARECOMP_VERSION "v0.0.29"
+#define LARECOMP_VERSION "v0.0.30"
 extern "C" const char *rt_version(void) { return LARECOMP_VERSION; }  // (runtime/main.c: the log's first line)
 extern "C" const char *larecomp_version(void) { return LARECOMP_VERSION; }  // (the shader caches' tag)
 

@@ -26,8 +26,16 @@
 > [PokeL-ARecomp](https://github.com/fabioschmidt01/PokeL-ARecomp).
 
 > [!NOTE]
-> **Últimas atualizações (v0.0.23 a v0.0.29): grandes melhorias de desempenho e estabilidade, e várias correções de
+> **Últimas atualizações (v0.0.23 a v0.0.30): grandes melhorias de desempenho e estabilidade, e várias correções de
 > bugs.**
+> - **v0.0.30:** contorno para a parada da GPU em placas NVIDIA quando um golpe do tipo Água Terastalizado mostra o
+>   efeito (`GPU did not finish submission ...`, Xid 109 no kernel; visto com o Water Spout do Kyogre): um draw de
+>   partículas desse efeito passa a usar o vertex shader equivalente do draw anterior ([#22](../../issues/22),
+>   [detalhes](docs/issue-22-gpu-hang.md); `LARECOMP_ISSUE22_FIX=0` desliga). A causa não é conhecida, e só foi
+>   testado numa NVIDIA RTX 5070 Ti no Linux. O gerador do código do jogo agora resolve tabelas de salto cuja
+>   verificação de limite fica longe do salto, provável causa dos crashes `no function at 7001d1e7a8` / `...8c8`
+>   ([#42](../../pull/42), para [#18](../../issues/18) / [#19](../../issues/19); ainda não confirmado jogando).
+>   **O código do jogo é recompilado uma vez (10-30 min) ao atualizar da v0.0.29.**
 > - **v0.0.29:** F1 > Detalhe do mundo e otimizações de taxa de quadros em detalhe alto ([#17](../../pull/17),
 >   [#25](../../pull/25)), quadros pretos / transparentes ao apertar "Battle" corrigidos ([#26](../../pull/26)), som da
 >   tela de título via `hwopus` + `libopus` ([#28](../../pull/28)), DLAA com movimento por personagem, correção de
@@ -192,6 +200,8 @@ Obrigado a todos que relataram problemas e enviaram correções: sem eles esses 
   ([#35](../../pull/35), [#36](../../pull/36)), correções no Metal/runtime ([#39](../../pull/39)) e CI multiplataforma
   com 57 execuções de testes automatizados ([#33](../../pull/33), [#37](../../pull/37), [#38](../../pull/38),
   [#40](../../pull/40)).
+  Na v0.0.30: contorno do travamento da GPU nos golpes de Água Terastalizados ([#22](../../issues/22)) e tabelas de
+  salto com verificação distante no gerador ([#42](../../pull/42)).
 
 Relatos e pull requests são bem-vindos: veja o [CONTRIBUTING.md](CONTRIBUTING.md).
 

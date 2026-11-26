@@ -1,0 +1,175 @@
+name: PR #42 Linux Test Build
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-test-build:
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.number == 42
+    name: Linux x86_64 Test Build (PR #42 @ 0e5702e2)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout Exact PR #42 Target Commit (0e5702e2)
+        uses: actions/checkout@v4
+        with:
+          ref: 0e5702e2f017d61c90118721d41b8d57a8b4f0f1
+
+      - name: Verify Exact Commit SHA
+        run: |
+          SHA=$(git rev-parse HEAD)
+          echo "Building from commit: $SHA"
+          [ "$SHA" = "0e5702e2f017d61c90118721d41b8d57a8b4f0f1" ]
+
+      - name: Build Docker Container (Ubuntu 22.04, clang 21, Python 3.12)
+        run: docker build -t za-linux-build -f tools/linux/Containerfile tools/linux
+
+      - name: Build Linux x86_64 AppImage & AppDir
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src za-linux-build bash -euo pipefail -c '
+            apt-get update
+            apt-get install -y --no-install-recommends dotnet-sdk-8.0 python3-venv
+            git config --global --add safe.directory /src
+            ln -sf "$(command -v python3.12)" /usr/local/bin/python
+            PYTHON=python3.12 tools/za/dist-linux.sh
+            find build/linux/x86_64/za-AppDir -type f \( -name "*.so*" -o -perm -u+x \) -exec objdump -T {} + 2>/dev/null |
+              grep -o "GLIBC_[0-9.]*" | sort -uV | tail -1 || true
+          '
+
+      - name: Package AppImage, Portable ZIP, and Test README
+        run: |
+          sudo chown -R "$(id -u):$(id -g)" build
+          mkdir -p build/test-artifacts/appimage build/test-artifacts/zip
+
+          cat > build/README-PR42-LINUX-TEST.md <<'EOF'
+          # PokeV-Recomp — Linux x86_64 Test Build (PR #42)
+
+          - **Pull Request:** [#42](https://github.com/didslima/PokeV-Recomp/pull/42) (`gen: resolve byte-offset jump tables with the guard up to 32 instructions back (#18, #19)`)
+          - **Commit SHA:** `0e5702e2f017d61c90118721d41b8d57a8b4f0f1`
+          - **Target Platform:** Linux `x86_64` (Ubuntu 22.04+ / glibc 2.35+, Fedora, Bazzite, Arch, SteamOS)
+          - **Game Code Note:** This PR updates `tools/gen.py` (which changes `GAMELIB_ID`). On first launch, PokeV-Recomp will automatically recompile `lasgame.so` from your own game files once. Your existing saves, `larecomp.ini`, and `~/.local/share/pokev-recomp` data directory are preserved.
+
+          ## Option 1: AppImage
+
+          ```bash
+          chmod +x PokeV-Recomp-pr42-0e5702e2-linux-x86_64.AppImage
+          ./PokeV-Recomp-pr42-0e5702e2-linux-x86_64.AppImage
+          ```
+
+          *(If FUSE is unavailable on your system, run with `--appimage-extract-and-run`.)*
+
+          ## Option 2: Portable ZIP Archive
+
+          ```bash
+          unzip PokeV-Recomp-pr42-0e5702e2-linux-x86_64.zip
+          cd PokeV-Recomp-pr42-0e5702e2-linux-x86_64
+          ./AppRun
+          ```
+
+          ## Capturing Logs for Issue Reports (#18 / #19)
+
+          If you run from a terminal and want to save full logs to a file:
+
+          ```bash
+          ./PokeV-Recomp-pr42-0e5702e2-linux-x86_64.AppImage > pokev-pr42.log 2>&1
+          ```
+
+          When launched from a desktop environment without a terminal, logs are written automatically to `~/.local/share/pokev-recomp/logs/lasrecomp.log`.
+          EOF
+
+          # 1. AppImage artifact
+          ORIG_APPIMAGE=$(ls build/dist/*.AppImage | head -n 1)
+          APPIMAGE_NAME="PokeV-Recomp-pr42-0e5702e2-linux-x86_64.AppImage"
+          cp "$ORIG_APPIMAGE" "build/test-artifacts/appimage/$APPIMAGE_NAME"
+          chmod +x "build/test-artifacts/appimage/$APPIMAGE_NAME"
+          cp build/README-PR42-LINUX-TEST.md build/test-artifacts/appimage/
+          (cd build/test-artifacts/appimage && sha256sum "$APPIMAGE_NAME" README-PR42-LINUX-TEST.md > SHA256SUMS.txt)
+
+          # 2. Portable ZIP archive from za-AppDir (preserving symlinks & executable bits)
+          ZIP_ROOT="PokeV-Recomp-pr42-0e5702e2-linux-x86_64"
+          ZIP_NAME="${ZIP_ROOT}.zip"
+          rm -rf "build/linux/x86_64/$ZIP_ROOT"
+          cp -a build/linux/x86_64/za-AppDir "build/linux/x86_64/$ZIP_ROOT"
+          cp build/README-PR42-LINUX-TEST.md "build/linux/x86_64/$ZIP_ROOT/"
+          (cd build/linux/x86_64 && zip -q -r -y "$PWD/../../test-artifacts/zip/$ZIP_NAME" "$ZIP_ROOT")
+          cp build/README-PR42-LINUX-TEST.md build/test-artifacts/zip/
+          (cd build/test-artifacts/zip && sha256sum "$ZIP_NAME" README-PR42-LINUX-TEST.md > SHA256SUMS.txt)
+
+          ls -lh build/test-artifacts/appimage build/test-artifacts/zip
+
+      - name: Validate Artifacts & Launch Smoke Test
+        run: |
+          set -euo pipefail
+          APPIMAGE="build/test-artifacts/appimage/PokeV-Recomp-pr42-0e5702e2-linux-x86_64.AppImage"
+          ZIPFILE="build/test-artifacts/zip/PokeV-Recomp-pr42-0e5702e2-linux-x86_64.zip"
+
+          # Verify AppImage executable bit and ELF/AppImage header
+          [ -x "$APPIMAGE" ]
+          python3 -c "
+          d = open('$APPIMAGE', 'rb').read(16)
+          assert d[:4] == b'\x7fELF' and d[8:11] == b'AI\x02', f'Unexpected header: {d!r}'
+          print('AppImage header OK')
+          "
+
+          # Verify ZIP contents, permissions, and absence of guest game code
+          unzip -l "$ZIPFILE" | head -n 40
+          unzip -Z -1 "$ZIPFILE" | grep -q '/AppRun$'
+          unzip -Z -1 "$ZIPFILE" | grep -q '/usr/bin/PokeV-Recomp$'
+          unzip -Z -1 "$ZIPFILE" | grep -q '/usr/bin/lasgen/lasgen$'
+          unzip -Z -1 "$ZIPFILE" | grep -q '/usr/bin/zaprompts/zaprompts$'
+          unzip -Z -1 "$ZIPFILE" | grep -q '/usr/bin/zaimport/zaimport$'
+          unzip -Z -1 "$ZIPFILE" | grep -q '/usr/bin/zig/zig$'
+          unzip -Z -1 "$ZIPFILE" | grep -q '/usr/lib/libSDL3.so.0$'
+          unzip -Z -1 "$ZIPFILE" | grep -q '/README-PR42-LINUX-TEST.md$'
+
+          # Smoke-test launch inside Ubuntu 22.04 container from unpacked ZIP & AppImage
+          rm -rf build/smoke-zip && mkdir -p build/smoke-zip
+          unzip -q "$ZIPFILE" -d build/smoke-zip
+          docker run --rm -v "$PWD:/src" -w /tmp za-linux-build bash -euo pipefail -c '
+            cd /src/build/smoke-zip/PokeV-Recomp-pr42-0e5702e2-linux-x86_64
+            [ -x ./AppRun ] && [ -x ./usr/bin/PokeV-Recomp ]
+            set +e
+            XDG_DATA_HOME=/tmp/smoke-xdg SDL_VIDEO_DRIVER=dummy LARECOMP_FORCE_LAUNCHER=1 LARECOMP_NO_LAUNCHER=1 ./AppRun > /tmp/zip-launch.log 2>&1
+            RC=$?
+            set -e
+            cat /tmp/zip-launch.log
+            cat /tmp/smoke-xdg/pokev-recomp/lasrecomp.log || true
+            [ "$RC" -eq 3 ]
+            grep -q "LARECOMP_NO_LAUNCHER is set" /tmp/smoke-xdg/pokev-recomp/lasrecomp.log
+            [ -d /tmp/smoke-xdg/pokev-recomp ]
+
+            set +e
+            XDG_DATA_HOME=/tmp/smoke-xdg SDL_VIDEO_DRIVER=dummy LARECOMP_FORCE_LAUNCHER=1 LARECOMP_NO_LAUNCHER=1 \
+              "/src/build/test-artifacts/appimage/PokeV-Recomp-pr42-0e5702e2-linux-x86_64.AppImage" --appimage-extract-and-run > /tmp/appimage-launch.log 2>&1
+            RC2=$?
+            set -e
+            cat /tmp/appimage-launch.log
+            cat /tmp/smoke-xdg/pokev-recomp/lasrecomp.log || true
+            [ "$RC2" -eq 3 ]
+            grep -q "LARECOMP_NO_LAUNCHER is set" /tmp/smoke-xdg/pokev-recomp/lasrecomp.log
+          '
+
+      - name: Upload Linux AppImage Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PokeV-Recomp-pr42-0e5702e2-linux-x86_64-AppImage
+          path: build/test-artifacts/appimage/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload Linux ZIP Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PokeV-Recomp-pr42-0e5702e2-linux-x86_64-zip
+          path: build/test-artifacts/zip/
+          if-no-files-found: error
+          retention-days: 30
