@@ -1,4 +1,4 @@
-name: PR #43 Linux Test Build (Issue #27)
+name: "PR #43 Linux Test Build (Issue #27)"
 
 on:
   pull_request:
