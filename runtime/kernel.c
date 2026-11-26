@@ -194,7 +194,17 @@ static uint64_t extra_memory(void) {
     }
     return (uint64_t)v;
 }
-#define APP_MEMORY (APP_MEMORY_HW + 2 * extra_memory())
+// The Vulkan backend's storage copies (exec.c snap_storage) need 16 MB the GPU sees inside the guest memory window,
+// right past the game's pool; Scarlet / Violet's pool already fills the window up to the 4 GB a storage buffer can
+// span, so the game is told of 16 MB less (its pool shrinks by that; the copies' ring takes the place). Without the
+// copies the GPU overlap let the GPU read data the game had rewritten for the next frame: the map's place names lost
+// letters for two frames at a time. LARECOMP_OVERLAP_SNAP=0: the full amount, as before
+static uint64_t snap_reserve(void) {
+    static int64_t v = -1;
+    if (v < 0) { const char *e = getenv("LARECOMP_OVERLAP_SNAP"); v = e && atoi(e) == 0 ? 0 : 16ll << 20; }
+    return (uint64_t)v;
+}
+#define APP_MEMORY (APP_MEMORY_HW + 2 * extra_memory() - snap_reserve())
 static uint64_t phys_mapped;
 static int phys_limit = -1;  // LARECOMP_PHYS_LIMIT=1: count physical memory as used and refuse mappings past APP_MEMORY
 static uint64_t used_memory(void) {
@@ -215,7 +225,25 @@ static uint64_t phys_new_bytes(uint64_t addr, uint64_t size) {
     return n;
 }
 
+// A guest range the host keeps for itself inside the address space the game maps into (exec.c: the storage copies'
+// ring after the game's pool). A physical mapping over it is logged and raises kernel_guard_hit (the backend then
+// stops using it). kernel_range_free: nothing mapped in [addr, addr + size).
+static uint64_t guard_lo, guard_hi;
+_Atomic int kernel_guard_hit;
+bool kernel_range_free(uint64_t addr, uint64_t size) {
+    bool ok = true;
+    pthread_mutex_lock(&g_mlock);
+    for (int i = 0; i < nregions && ok; i++) if (regions[i].addr < addr + size && addr < regions[i].addr + regions[i].size) ok = false;
+    pthread_mutex_unlock(&g_mlock);
+    return ok;
+}
+void kernel_guard_range(uint64_t addr, uint64_t size) { guard_lo = addr, guard_hi = addr + size; }
 static void phys_map(uint64_t addr, uint64_t size) {
+    if (guard_hi && addr < guard_hi && guard_lo < addr + size && !kernel_guard_hit) {
+        kernel_guard_hit = 1;
+        LOG("[kernel] the game mapped memory over the host's range %llx-%llx (%llx +%llx): the storage copies stop\n",
+            (unsigned long long)guard_lo, (unsigned long long)guard_hi, (unsigned long long)addr, (unsigned long long)size);
+    }
     phys_mapped += phys_new_bytes(addr, size);
     uint64_t end = addr + size, cur = addr, gaps[64][2];
     int ngaps = 0;
