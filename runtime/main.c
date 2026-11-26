@@ -1,5 +1,6 @@
 // PokeV-Recomp entry: load modules, set up the kernel, run nn::init::Start on the main thread.
 #include <SDL3/SDL.h>
+#include <limits.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
@@ -215,6 +216,10 @@ static void boot(const char *root) {
     loader_load(exefs);
     rando_boot();  // the chosen seed's data patches go into the freshly loaded module
     { extern void settings_load(void); settings_load(); }
+    {
+        const char *rl_mode = getenv("RECOMPLAUNCHER_MODE");
+        if (rl_mode && !strcmp(rl_mode, "bigpicture")) g_settings.fullscreen = true;
+    }
     kernel_init();
     dispatch_init();
 
@@ -273,6 +278,34 @@ static void log_startup_info(void) {
             si.cpu[0] ? si.cpu : "unknown CPU", cores, ram, si.package ? ", " : "", si.package ? si.package : "");
 }
 
+static const char *resolve_cli_path(const char *p, char *buf, size_t n) {
+    if (!p || !*p) return NULL;
+#ifdef PATH_MAX
+    char tmp[PATH_MAX];
+#else
+    char tmp[4096];
+#endif
+    if (realpath(p, tmp)) {
+        snprintf(buf, n, "%s", tmp);
+        return buf;
+    }
+    snprintf(buf, n, "%s", p);
+    return buf;
+}
+
+static bool take_flag_value(int argc, char **argv, int *idx, const char *name, const char **out) {
+    size_t n = strlen(name);
+    if (!strncmp(argv[*idx], name, n) && argv[*idx][n] == '=') {
+        *out = argv[*idx] + n + 1;
+        return true;
+    }
+    if (!strcmp(argv[*idx], name) && *idx + 1 < argc) {
+        *out = argv[++(*idx)];
+        return true;
+    }
+    return false;
+}
+
 int main(int argc, char **argv) {
     plat_init();
     log_startup_info();
@@ -295,13 +328,36 @@ int main(int argc, char **argv) {
     bool no_launcher = nl && *nl && strcmp(nl, "0");
     bool skip_launcher = no_launcher || getenv("LARECOMP_INPUT");  // tests boot straight in
     if (getenv("LARECOMP_FORCE_LAUNCHER")) skip_launcher = false;  // (test: the start screen, then the scripted input)
-    static char arg_root[1024];
+    static char arg_root[1024], prep_game_buf[1024], prep_upd_buf[1024], prep_keys_buf[1024], prep_tkeys_buf[1024];
+    bool prepare = false;
+    const char *prep_game = NULL, *prep_upd = NULL, *prep_keys = NULL, *prep_tkeys = NULL, *v = NULL;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--play")) skip_launcher = true;
+        else if (!strcmp(argv[i], "--prepare")) prepare = true;
+        else if (take_flag_value(argc, argv, &i, "--game", &v))
+            prep_game = resolve_cli_path(v, prep_game_buf, sizeof prep_game_buf);
+        else if (take_flag_value(argc, argv, &i, "--update", &v))
+            prep_upd = resolve_cli_path(v, prep_upd_buf, sizeof prep_upd_buf);
+        else if (take_flag_value(argc, argv, &i, "--keys", &v))
+            prep_keys = resolve_cli_path(v, prep_keys_buf, sizeof prep_keys_buf);
+        else if (take_flag_value(argc, argv, &i, "--title-keys", &v))
+            prep_tkeys = resolve_cli_path(v, prep_tkeys_buf, sizeof prep_tkeys_buf);
+        else if (take_flag_value(argc, argv, &i, "--data", &v)) {
+#ifdef _WIN32
+            _putenv_s("LARECOMP_DATA_ROOT", v);
+#else
+            setenv("LARECOMP_DATA_ROOT", v, 1);
+#endif
+        }
         else if (argv[i][0] != '-' && !realpath(argv[i], arg_root)) root = argv[i];  // (relative to where we started)
         else if (argv[i][0] != '-') root = arg_root;
     }
     rt_paths_init();  // the data root becomes the working directory (runtime/paths.h)
+    if (prepare) {
+        extern int launcher_prepare(const char *root, const char *game_path, const char *update_path,
+                                    const char *keys_path, const char *title_keys_path);
+        return launcher_prepare(root, prep_game, prep_upd, prep_keys, prep_tkeys);
+    }
     {   // Pokémon Violet 4.0.0 (runtime/game_identity.h; until v0.0.24 this list was Z-A's and Arceus's builds, copied
         // over, and Violet's own wasn't in it): the start screen sets its files up from the player's packages
         // (zaimport). Started without a log redirect (a double click): the log goes to logs/play.log (the previous one:
