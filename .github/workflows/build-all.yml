@@ -164,6 +164,8 @@ jobs:
           PYTHONUTF8: "1"
         run: |
           set -euo pipefail
+          CLEAN_PATH=$(echo "$PATH" | tr ':' '\n' | grep -v -i "Program Files/LLVM" | grep -v -i "Windows Kits" | tr '\n' ':')
+          export PATH="$CLEAN_PATH"
           SCHEMA_URL="https://raw.githubusercontent.com/elripalda/RecompLauncher/7d8bc7a59d472402ada20e2fff2fbbf806e10797/docs/recomplauncher.schema.json"
           curl -fsSL "$SCHEMA_URL" -o "$RUNNER_TEMP/recomplauncher.schema.json"
           python -m venv "$RUNNER_TEMP/win-rl-venv"
@@ -231,12 +233,16 @@ jobs:
                   assert not non_vulkan_missing, f"Missing bundled DLLs in ZIP:\n{chr(10).join(non_vulkan_missing)}"
                   if any("vulkan-1" in m.lower() for m in missing):
                       import shutil
-                      ucrt_bin = Path(shutil.which("clang")).parent
+                      ucrt_bin = next(
+                          (Path(p) for p in os.environ.get("PATH", "").split(os.pathsep)
+                           if "ucrt64" in p.lower() and Path(p).is_dir()),
+                          Path(shutil.which("clang")).parent,
+                      )
                       for cand in (ucrt_bin / "vulkan-1.dll", ucrt_bin / "libvulkan-1.dll"):
                           if cand.is_file():
                               shutil.copy2(cand, app_dir / "vulkan-1.dll")
                               break
-                      assert (app_dir / "vulkan-1.dll").is_file(), "Could not locate UCRT64 vulkan-1.dll for headless runner"
+                      assert (app_dir / "vulkan-1.dll").is_file(), f"Could not locate UCRT64 vulkan-1.dll in {ucrt_bin}"
 
                   manifest = json.loads((app_dir / "recomplauncher.json").read_text(encoding="utf-8"))
                   schema = json.loads(Path(os.environ["RUNNER_TEMP"], "recomplauncher.schema.json").read_text(encoding="utf-8"))
