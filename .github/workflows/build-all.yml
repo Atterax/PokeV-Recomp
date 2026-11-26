@@ -230,6 +230,10 @@ jobs:
                   assert not non_vulkan_missing, f"Missing bundled DLLs in ZIP:\n{chr(10).join(non_vulkan_missing)}"
                   if any("vulkan-1" in m.lower() for m in missing):
                       import shutil
+                      subprocess.run(
+                          ["pacman", "-S", "--noconfirm", "--needed", "mingw-w64-ucrt-x86_64-vulkan-loader"],
+                          check=True,
+                      )
                       ucrt_bin = Path(shutil.which("clang")).parent
                       for cand in (ucrt_bin / "vulkan-1.dll", ucrt_bin / "libvulkan-1.dll"):
                           if cand.is_file():
