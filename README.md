@@ -28,7 +28,13 @@
 > [PokeL-ARecomp](https://github.com/fabioschmidt01/PokeL-ARecomp).
 
 > [!NOTE]
-> **Latest updates (v0.0.23 to v0.0.30): big improvements in performance and stability, and many bug fixes.**
+> **Latest updates (v0.0.23 to v0.1.0): big improvements in performance and stability, and many bug fixes.**
+> - **v0.1.0:** RecompLauncher integration (`recomplauncher.json`, `--prepare` / `--play`, save and data-root
+>   support; [#50](../../pull/50)), water reflections (SSPR & planar) with F1 water options and waterfall/distance
+>   fixes ([#44](../../pull/44)), Miraidon/Koraidon 60 fps jump fix ([#48](../../pull/48)), long-session frame-rate &
+>   DLAA mirror fixes ([#45](../../pull/45)), map place-name missing-letter / storage-overlap fix ([#46](../../pull/46)),
+>   and compute UBO staging from secondary guest memory pools ([#43](../../pull/43), [#27](../../issues/27)).
+>   **The game code is recompiled once (10-30 min) when upgrading from v0.0.30.**
 > - **v0.0.30:** a workaround for the GPU stop on NVIDIA when a Terastallized Water-type move plays its effect
 >   (`GPU did not finish submission ...`, kernel Xid 109; seen with Kyogre's Water Spout): one particle draw of that
 >   effect now uses the equivalent vertex shader of the draw before it ([#22](../../issues/22),
@@ -185,7 +191,9 @@ Thank you to everyone who reported problems and sent fixes: without them these b
   ([#13](../../pull/13)), F1 > People shown ([#15](../../pull/15)) and People / Pokémon detail ([#16](../../pull/16)).
   In v0.0.29: F1 > World detail and high-detail frame-rate work ([#17](../../pull/17), [#25](../../pull/25)), battle
   black / see-through frames fixed ([#26](../../pull/26)), `hwopus` audio ([#28](../../pull/28)) and DLAA motion / UI
-  fixes ([#29](../../pull/29)).
+  fixes ([#29](../../pull/29)). In v0.1.0: water reflections & F1 water options ([#44](../../pull/44)), long-session
+  frame-rate & DLAA mirror fixes ([#45](../../pull/45)), map text storage-overlap copies ([#46](../../pull/46)), and
+  Miraidon's 60 fps jump fix ([#48](../../pull/48)).
 - **[didslima](https://github.com/didslima)**: tested the Linux AppImage on Bazzite, reported that it shared Legends:
   Arceus's data folder ([#1](../../issues/1)) and fixed it: PokeV-Recomp's own data folder, only Pokémon Violet's
   files accepted, PokeV-Recomp names in the AppImage, with tests ([#2](../../pull/2)). In v0.0.28: 32:9 ultrawide
@@ -195,7 +203,8 @@ Thank you to everyone who reported problems and sent fixes: without them these b
   [#36](../../pull/36)), Metal/runtime fixes ([#39](../../pull/39)), and cross-platform CI + 57-run test suite
   ([#33](../../pull/33), [#37](../../pull/37), [#38](../../pull/38), [#40](../../pull/40)). In v0.0.30: the Terastallized
   Water move GPU-hang workaround ([#22](../../issues/22)) and distant-guard jump tables in the generator
-  ([#42](../../pull/42)).
+  ([#42](../../pull/42)). In v0.1.0: compute UBO staging from secondary guest memory pools ([#43](../../pull/43),
+  [#27](../../issues/27)) and RecompLauncher integration ([#50](../../pull/50)).
 
 Reports and pull requests are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md).
 

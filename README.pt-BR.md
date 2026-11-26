@@ -28,8 +28,14 @@
 > [PokeL-ARecomp](https://github.com/fabioschmidt01/PokeL-ARecomp).
 
 > [!NOTE]
-> **Últimas atualizações (v0.0.23 a v0.0.30): grandes melhorias de desempenho e estabilidade, e várias correções de
+> **Últimas atualizações (v0.0.23 a v0.1.0): grandes melhorias de desempenho e estabilidade, e várias correções de
 > bugs.**
+> - **v0.1.0:** integração com o RecompLauncher (`recomplauncher.json`, `--prepare` / `--play`, suporte a saves e
+>   pasta de dados; [#50](../../pull/50)), reflexos na água (SSPR e planar) com opções no F1 e correções em cachoeiras
+>   / água distante ([#44](../../pull/44)), correção do salto de Miraidon/Koraidon a 60 fps ([#48](../../pull/48)),
+>   estabilidade de quadros em sessões longas e DLAA ([#45](../../pull/45)), correção de letras faltando no mapa /
+>   storage overlap ([#46](../../pull/46)) e staging de UBOs em compute de pools secundários ([#43](../../pull/43),
+>   [#27](../../issues/27)). **O código do jogo é recompilado uma vez (10-30 min) ao atualizar da v0.0.30.**
 > - **v0.0.30:** contorno para a parada da GPU em placas NVIDIA quando um golpe do tipo Água Terastalizado mostra o
 >   efeito (`GPU did not finish submission ...`, Xid 109 no kernel; visto com o Water Spout do Kyogre): um draw de
 >   partículas desse efeito passa a usar o vertex shader equivalente do draw anterior ([#22](../../issues/22),
@@ -192,7 +198,10 @@ Obrigado a todos que relataram problemas e enviaram correções: sem eles esses 
   oclusão ambiente e luz indireta ([#13](../../pull/13)), F1 > Pessoas exibidas ([#15](../../pull/15)) e detalhe de
   pessoas / Pokémon ([#16](../../pull/16)). Na v0.0.29: F1 > Detalhe do mundo e desempenho em detalhe alto
   ([#17](../../pull/17), [#25](../../pull/25)), quadros pretos / transparentes ao iniciar batalhas corrigidos
-  ([#26](../../pull/26)), áudio `hwopus` ([#28](../../pull/28)) e melhorias no DLAA ([#29](../../pull/29)).
+  ([#26](../../pull/26)), áudio `hwopus` ([#28](../../pull/28)) e melhorias no DLAA ([#29](../../pull/29)). Na v0.1.0:
+  reflexos na água e opções no F1 ([#44](../../pull/44)), estabilidade de quadros em sessões longas e DLAA
+  ([#45](../../pull/45)), cópias de storage para textos do mapa ([#46](../../pull/46)) e correção do salto do
+  Miraidon a 60 fps ([#48](../../pull/48)).
 - **[didslima](https://github.com/didslima)**: testou o AppImage no Bazzite, relatou que ele usava a pasta de dados do
   Legends: Arceus ([#1](../../issues/1)) e corrigiu: pasta de dados própria do PokeV-Recomp, só arquivos do Pokémon
   Violet aceitos, nomes do PokeV-Recomp no AppImage, com testes ([#2](../../pull/2)). Na v0.0.28: suporte a
@@ -203,7 +212,8 @@ Obrigado a todos que relataram problemas e enviaram correções: sem eles esses 
   com 57 execuções de testes automatizados ([#33](../../pull/33), [#37](../../pull/37), [#38](../../pull/38),
   [#40](../../pull/40)).
   Na v0.0.30: contorno do travamento da GPU nos golpes de Água Terastalizados ([#22](../../issues/22)) e tabelas de
-  salto com verificação distante no gerador ([#42](../../pull/42)).
+  salto com verificação distante no gerador ([#42](../../pull/42)). Na v0.1.0: staging de UBOs em compute de pools
+  secundários ([#43](../../pull/43), [#27](../../issues/27)) e integração com o RecompLauncher ([#50](../../pull/50)).
 
 Relatos e pull requests são bem-vindos: veja o [CONTRIBUTING.md](CONTRIBUTING.md).
 

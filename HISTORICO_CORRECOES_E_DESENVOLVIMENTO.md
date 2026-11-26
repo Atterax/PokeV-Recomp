@@ -1067,4 +1067,40 @@ Mudanças entre a `v0.0.29` e a `v0.0.30`:
 
 ---
 
+## 38. Release v0.1.0 — RecompLauncher (#50), reflexos da água (#44), salto a 60 FPS (#48) e estabilidade (#43, #45, #46)
+
+Mudanças entre a `v0.0.30` e a `v0.1.0`:
+- **#50 (RecompLauncher, didslima):** integração opt-in com o RecompLauncher:
+  - Manifesto `recomplauncher.json` embarcado no AppImage Linux (`AppRun`) e no ZIP Windows (`PokeV-Recomp.exe`), com
+    suporte no runtime (`runtime/main.c`, `runtime/paths.c`, `runtime/ui/launcher.mm`, `runtime/path_overlap.h`) para
+    `--prepare`, `--play`, `LARECOMP_DATA_ROOT`, saves em `{data}/save/save_0` e resolução de symlinks/junctions no
+    Windows (`overlap_realpath`).
+  - Validado end-to-end no Bazzite Linux (AppImage, `AppRun`, `--prepare`, `--play`, importação e gravação de saves,
+    persistência de configurações e instalação limpa) e por smoke tests automatizados no CI Windows (`windows-2022`),
+    ainda sem validação completa de gameplay em Windows real. Testes: `tools/test_recomplauncher.py`.
+- **#48 (gameplay a 60 FPS, Atterax):** correção do salto do Miraidon/Koraidon a 60 FPS (`tools/sv_patches.py`,
+  `runtime/hle/framepace.c`). Os scripts Lua usavam passo fixo de `1/30` por quadro, fazendo o salto durar metade do
+  tempo e atingir metade da altura a 60 FPS; `rt_sv_lua_frame_time` passa a atualizar o delta de tempo dos scripts pelo
+  tempo real do quadro (`LARECOMP_SV_LUA_DT=0` desliga).
+- **#44 (gráficos e reflexos da água, Atterax):** reflexos na água por imagem espelhada (SSPR) e cena espelhada
+  (planar) com opções de água no menu F1 (`runtime/settings.c`, `runtime/settings.h`, `runtime/ui/menu.mm`,
+  `runtime/nvn/vulkan/shaders.c`, `runtime/nvn/vulkan/exec.c`), restritos a superfícies planas (sem afetar vidros),
+  correções de cintilação em cachoeiras e água distante, emendas entre malhas de água, redução de riscos de árvores na
+  busca em tela, eliminação de lock no G-buffer quando não há água espelhada e ampliação do cache de pipelines de
+  pós-processamento de 24 para 32 tipos.
+- **#45 (performance em sessões longas e DLAA, Atterax):** shadow workers mantêm os draws com resolve de TAA na thread
+  de renderização, mirror de transform feedback ampliado de 256 MB para 512 MB (evitando queda para memória do sistema
+  após jogo longo) e cópia empacotada apenas das fatias do mirror lidas por personagens no DLAA object motion.
+- **#46 (rendering e textos do mapa, Atterax):** cópias de storage overlap na janela física de memória (`exec.c`) com
+  ring de 16 MB após o pool do jogo e cópia de leituras de storage reescritas recentemente pela CPU, corrigindo letras
+  faltando nos nomes de locais do mapa. Testes: `tools/test_vulkan_overlap.py`.
+- **#43 / #27 (GPU compute UBO / GMEM, didslima):** staging via `gfind` 64-bit (`runtime/nvn/maxwell/translate.c`,
+  `runtime/nvn/vulkan/exec.c`) para leituras de UBO em compute shaders a partir de pools secundários de memória guest.
+  Testes: `tools/test_gfind_glsl.py`.
+- **`GAMELIB_ID` muda (#48 altera `tools/sv_patches.py`):** o código do jogo é recompilado uma vez (10-30 min) ao
+  atualizar da `v0.0.30`.
+  Versão **`v0.1.0`**.
+
+---
+
 *Documento mantido em sincronia contínua pelo assistente de IA Antigravity (Google DeepMind).*
