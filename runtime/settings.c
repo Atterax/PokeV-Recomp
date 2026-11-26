@@ -311,6 +311,10 @@ void settings_load(void) {
         else if (!strcmp(key, "world_detail")) { int v = atoi(val); g_settings.world_detail = v < 1 ? 1 : v > 16 ? 16 : v; }
         else if (!strcmp(key, "npc_detail")) { int v = atoi(val); g_settings.npc_detail = v < 1 ? 1 : v > 16 ? 16 : v; }
         else if (!strcmp(key, "pokemon_detail")) { int v = atoi(val); g_settings.pokemon_detail = v < 1 ? 1 : v > 16 ? 16 : v; }
+        else if (!strcmp(key, "water_reflection_method")) { int v = atoi(val); g_settings.water_mode = v < 0 ? 0 : v > 2 ? 2 : v; }
+        else if (!strcmp(key, "water_depth")) g_settings.water_depth = atoi(val) != 0;
+        else if (!strcmp(key, "water_caustics")) g_settings.water_caustics = atoi(val) != 0;
+        else if (!strcmp(key, "water_vivid")) g_settings.water_vivid = atoi(val) != 0;
         else if (!strcmp(key, "tex_dump")) g_settings.tex_dump = atoi(val) != 0;
         else if (!strcmp(key, "resolution")) {  // (auto: never chosen, the GPU's default)
             int n = atoi(val);
@@ -449,6 +453,10 @@ void settings_save(void) {
     fprintf(f, "world_detail = %d\n", g_settings.world_detail < 1 ? 1 : g_settings.world_detail);
     fprintf(f, "npc_detail = %d\n", g_settings.npc_detail < 1 ? 1 : g_settings.npc_detail);
     fprintf(f, "pokemon_detail = %d\n", g_settings.pokemon_detail < 1 ? 1 : g_settings.pokemon_detail);
+    fprintf(f, "water_reflection_method = %d\n", g_settings.water_mode);
+    fprintf(f, "water_depth = %d\n", g_settings.water_depth);
+    fprintf(f, "water_caustics = %d\n", g_settings.water_caustics);
+    fprintf(f, "water_vivid = %d\n", g_settings.water_vivid);
     fprintf(f, "tex_dump = %d\n", g_settings.tex_dump);
     fprintf(f, "upscaler = %s\n", g_settings.upscaler_auto ? "auto" : g_settings.upscaler == UPSCALE_METALFX ? "metalfx" :
                                    g_settings.upscaler == UPSCALE_XESS ? "xess" : g_settings.upscaler == UPSCALE_FSR1 ? "fsr1" : "bilinear");
