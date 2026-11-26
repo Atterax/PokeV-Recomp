@@ -2729,9 +2729,10 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         sp(&s, "layout(std140, set = %d, binding = %d) uniform GMap { uvec4 gmap[%d]; };\n", set, GMAP_BUFFER_INDEX, GMAP_MAX + 1);
         sp(&s, "layout(std430, set = %d, binding = %d) %sbuffer GFast { uint w[]; } gfast_;\n", set, GFAST_BUFFER_INDEX,
            c->uses_gmem_store ? "" : "readonly ");
-        sp(&s, "uint gfind(ulong a) { uint n = gmap[%d].x; for (uint i = 0u; i < n; i++) { "
-               "ulong b = (ulong(gmap[i].w) << 32) | ulong(gmap[i].x); ulong o = a - b; "
-               "if (a >= b && o < ulong(gmap[i].y)) return gmap[i].z + uint(o >> 2); } return 0xFFFFFFFFu; }\n", GMAP_MAX);
+        // (the header is not glsl_rewrite()'s input: GLSL types here - uint64_t, not the body's MSL ulong)
+        sp(&s, "uint gfind(uint64_t a) { uint n = gmap[%d].x; for (uint i = 0u; i < n; i++) { "
+               "uint64_t b = (uint64_t(gmap[i].w) << 32) | uint64_t(gmap[i].x); uint64_t o = a - b; "
+               "if (a >= b && o < uint64_t(gmap[i].y)) return gmap[i].z + uint(o >> 2); } return 0xFFFFFFFFu; }\n", GMAP_MAX);
     }
     if (xfb) sp(&s, "layout(std140, set = 0, binding = 18) uniform RScale { vec4 rscale[70]; };\n");
     if (c->uses_rscale && stage != STAGE_VERTEX) {

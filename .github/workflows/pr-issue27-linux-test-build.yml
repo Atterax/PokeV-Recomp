@@ -25,27 +25,50 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
+      # pull_request: exactly the PR's head commit (not the merge ref, not a pinned older commit); workflow_dispatch:
+      # the commit inputs.ref names
       - name: Checkout Target Ref
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || '50e6d1e2cb77d2186e3a65c507c04a2bb28f08f2' }}
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || inputs.ref }}
           fetch-depth: 0
 
       - name: Verify Commit Belongs to PR #43 Branch and Contains Issue #27 Fix
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          INPUT_REF: ${{ inputs.ref }}
         run: |
           set -euo pipefail
           SHA=$(git rev-parse HEAD)
+          # the commit that was asked for, resolved independently of the checkout: the build is that commit or nothing
+          if [ "$EVENT_NAME" = pull_request ]; then
+            EXPECTED="$PR_HEAD_SHA"
+          else
+            EXPECTED=$(git rev-parse --verify --quiet "${INPUT_REF}^{commit}" ||
+                       git rev-parse --verify "origin/${INPUT_REF}^{commit}")
+          fi
+          if [ -z "$EXPECTED" ] || [ "$SHA" != "$EXPECTED" ]; then
+            echo "Checked out $SHA, but the $EVENT_NAME asked for '${EXPECTED:-?}'"
+            exit 1
+          fi
           SHORT_SHA=$(git rev-parse --short=8 HEAD)
           echo "SHA=$SHA" >> "$GITHUB_ENV"
           echo "SHORT_SHA=$SHORT_SHA" >> "$GITHUB_ENV"
-          echo "Building from commit: $SHA ($SHORT_SHA)"
+          echo "Building from commit: $SHA ($SHORT_SHA), as the $EVENT_NAME asked"
 
+          # the selected commit: on the PR #43 branch, and with the issue #27 fix commits
           git fetch origin fix/issue-27-compute-ubuf-gmem main
           git merge-base --is-ancestor "$SHA" origin/fix/issue-27-compute-ubuf-gmem
           git merge-base --is-ancestor 50e6d1e2cb77d2186e3a65c507c04a2bb28f08f2 "$SHA"
 
-          # Confirm issue #27 fix is present and PR #42 tools/gen.py changes are absent
-          grep -q 'uint gfind(ulong a)' runtime/nvn/maxwell/translate.c
+          # Confirm issue #27 fix is present (gfind in GLSL types: the header is not rewritten from MSL) and PR #42
+          # tools/gen.py changes are absent
+          grep -q 'uint gfind(uint64_t a)' runtime/nvn/maxwell/translate.c
+          if grep -q 'uint gfind(ulong' runtime/nvn/maxwell/translate.c; then
+            echo "gfind() still declared with the MSL ulong type"
+            exit 1
+          fi
           grep -q 'st.ubuf\[5\]\[i\].addr' runtime/nvn/vulkan/exec.c
           if ! git diff --quiet origin/main..."$SHA" -- tools/gen.py; then
             echo "Unexpected tools/gen.py diff compared to origin/main!"
@@ -59,12 +82,14 @@ jobs:
         run: |
           docker run --rm -v "$PWD:/src" -w /src za-linux-build bash -euo pipefail -c '
             apt-get update
-            apt-get install -y --no-install-recommends dotnet-sdk-8.0 python3-venv
+            apt-get install -y --no-install-recommends dotnet-sdk-8.0 python3-venv spirv-tools
             git config --global --add safe.directory /src
             ln -sf "$(command -v python3.12)" /usr/local/bin/python
             PYTHON=python3.12 tools/za/dist-linux.sh
             find build/linux/x86_64/za-AppDir -type f \( -name "*.so*" -o -perm -u+x \) -exec objdump -T {} + 2>/dev/null |
               grep -o "GLIBC_[0-9.]*" | sort -uV | tail -1 || true
+            # issue #27: the gmap / gfast_ compute shaders compile with the shaderc the app ships (build/linux/x86_64/deps)
+            REQUIRE_SHADERC=1 CC=clang python3 tools/test_gfind_glsl.py
           '
 
       - name: Package AppImage, Portable ZIP, and Test README
