@@ -28,7 +28,15 @@
 > [PokeL-ARecomp](https://github.com/fabioschmidt01/PokeL-ARecomp).
 
 > [!NOTE]
-> **Latest updates (v0.0.23 to v0.0.29): big improvements in performance and stability, and many bug fixes.**
+> **Latest updates (v0.0.23 to v0.0.30): big improvements in performance and stability, and many bug fixes.**
+> - **v0.0.30:** a workaround for the GPU stop on NVIDIA when a Terastallized Water-type move plays its effect
+>   (`GPU did not finish submission ...`, kernel Xid 109; seen with Kyogre's Water Spout): one particle draw of that
+>   effect now uses the equivalent vertex shader of the draw before it ([#22](../../issues/22),
+>   [details](docs/issue-22-gpu-hang.md); `LARECOMP_ISSUE22_FIX=0` turns it off). The cause is not known, and it was
+>   tested only on an NVIDIA RTX 5070 Ti on Linux. The game-code generator now resolves jump tables whose bounds check
+>   is far from the jump, the likely cause of the `no function at 7001d1e7a8` / `...8c8` crashes ([#42](../../pull/42),
+>   for [#18](../../issues/18) / [#19](../../issues/19); not yet confirmed in play). **The game code is recompiled
+>   once (10-30 min) when upgrading from v0.0.29.**
 > - **v0.0.29:** F1 > World detail and high-detail frame-rate optimizations ([#17](../../pull/17), [#25](../../pull/25)),
 >   black / see-through frames after pressing "Battle" fixed ([#26](../../pull/26)), title-screen sound via `hwopus` +
 >   `libopus` ([#28](../../pull/28)), DLAA per-object character motion vectors, fade-grid fix and post-resolve UI
@@ -185,7 +193,9 @@ Thank you to everyone who reported problems and sent fixes: without them these b
   `PokeV-Recomp` identity ([#30](../../pull/30), [#32](../../pull/32), [#34](../../pull/34)), resilient `lasgame.dll`
   cache replacement ([#31](../../pull/31)), AMD GPU write & automatic slow-frame diagnostics ([#35](../../pull/35),
   [#36](../../pull/36)), Metal/runtime fixes ([#39](../../pull/39)), and cross-platform CI + 57-run test suite
-  ([#33](../../pull/33), [#37](../../pull/37), [#38](../../pull/38), [#40](../../pull/40)).
+  ([#33](../../pull/33), [#37](../../pull/37), [#38](../../pull/38), [#40](../../pull/40)). In v0.0.30: the Terastallized
+  Water move GPU-hang workaround ([#22](../../issues/22)) and distant-guard jump tables in the generator
+  ([#42](../../pull/42)).
 
 Reports and pull requests are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md).
 

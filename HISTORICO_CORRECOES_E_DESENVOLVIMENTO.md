@@ -1039,4 +1039,32 @@ Melhorias integradas entre a `v0.0.28` e a `v0.0.29`:
 
 ---
 
+## 37. Release v0.0.30 — Travamento da GPU nos golpes de Água Terastalizados (#22) e tabelas de salto (#42)
+
+Mudanças entre a `v0.0.29` e a `v0.0.30`:
+- **#42 (gerador, didslima):** `tools/gen.py` resolve tabelas de salto por deslocamento em bytes cuja verificação de
+  limite fica até 32 instruções antes do `br` (`Module.jump_table_wide`, só depois dos reconhecedores existentes). É a
+  provável causa dos crashes `no function at 7001d1e7a8` / `…8c8` (#18, #19), validada no código gerado, **ainda não
+  confirmada jogando**. Testes: `tools/test_jump_table.py` no CI (Linux, Windows e macOS).
+- **#22 (runtime, didslima):** contorno para a parada da GPU em NVIDIA (`GPU did not finish submission N within 10 s`,
+  Xid 109) quando um golpe do tipo Água Terastalizado mostra o efeito (reproduzido com o Water Spout do Kyogre,
+  *Pokémon Violet* 4.0.0). Um dos draws de partículas do efeito ("E", vertex shader `09c1280fee686904`) passa a usar o
+  vertex shader do draw anterior do mesmo pass ("D", `2aadd88fa6502c59`: mesmo fragment shader, mesma interface, mesmas
+  saídas avaliadas na CPU). Todo o resto é do E: fragment shader, entradas, estado, scissor, viewport e o `vkCmdDraw`
+  direto com os parâmetros dele (`runtime/nvn/vulkan/exec.c`, `i22fix_*`). Sem um D válido, o E é desenhado como o
+  jogo pede, com uma linha `[vk] issue #22` no log. `LARECOMP_ISSUE22_FIX=0` desliga. **A causa não foi
+  identificada.** Investigação e experimentos (A–K5; K5: 219/219 draws de E com o draw direto do jogo, sem timeout e
+  sem Xid): `docs/issue-22-gpu-hang.md`. Testado só numa RTX 5070 Ti, driver 620.73.04, Linux. Teste:
+  `tools/test_issue22_fix.py` (no CI Linux). O código dos experimentos K1–K5 **não** está na release; ficou no branch
+  local de diagnóstico. A primeira versão exigia um programa só com vertex + fragment e recusava o programa composto
+  dos binds (`st.comp`), que guarda o estágio de compute de um bind anterior (máscara `0x23`): o E voltou ao próprio
+  vertex shader e a GPU travou. Agora bastam os bits de vertex e fragment, e a build final foi **validada jogando**
+  (AppImage `61f0527b…`, RTX 5070 Ti): 100 substituições, nenhum retorno ao vertex shader do E, nenhum timeout da GPU
+  e nenhum Xid.
+- **`GAMELIB_ID` muda (#42 altera o gerador):** o código do jogo é recompilado uma vez (10-30 min) ao atualizar da
+  `v0.0.29` (Linux `bd0dd5aa65c7e522` → `98edf5304c9c7e63`; Windows `d2a6116e02aec4ed` → `cc87153ae587af4f`).
+  Versão **`v0.0.30`**.
+
+---
+
 *Documento mantido em sincronia contínua pelo assistente de IA Antigravity (Google DeepMind).*

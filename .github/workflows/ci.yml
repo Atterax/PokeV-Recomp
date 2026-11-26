@@ -288,6 +288,7 @@ jobs:
           if [ "${{ matrix.platform }}" = "linux" ]; then
             tests+=(
               tools/test_data_dir.py
+              tools/test_issue22_fix.py
             )
           fi
           if [ "${{ matrix.platform }}" != "macos" ]; then
