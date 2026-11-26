@@ -157,6 +157,150 @@ jobs:
             Move-Item -Force "build/dist-za/ZA-Recomp-windows.zip" "build/dist-za/PokeV-Recomp-windows-x64.zip"
           }
 
+      - name: Validate Windows ZIP & RecompLauncher CLI Smoke Tests
+        shell: bash
+        env:
+          PYTHONUTF8: "1"
+        run: |
+          set -euo pipefail
+          SCHEMA_URL="https://raw.githubusercontent.com/elripalda/RecompLauncher/7d8bc7a59d472402ada20e2fff2fbbf806e10797/docs/recomplauncher.schema.json"
+          curl -fsSL "$SCHEMA_URL" -o "$RUNNER_TEMP/recomplauncher.schema.json"
+          python -m venv "$RUNNER_TEMP/win-rl-venv"
+          "$RUNNER_TEMP/win-rl-venv/Scripts/python.exe" -m pip install -q jsonschema
+          "$RUNNER_TEMP/win-rl-venv/Scripts/python.exe" - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+          import tempfile
+          import zipfile
+          import jsonschema
+
+          zip_path = Path("build/dist-za/PokeV-Recomp-windows-x64.zip")
+          assert zip_path.is_file(), f"Missing {zip_path}"
+
+          with zipfile.ZipFile(zip_path, "r") as zf:
+              names = set(zf.namelist())
+              required = [
+                  "PokeV-Recomp/PokeV-Recomp.exe",
+                  "PokeV-Recomp/recomplauncher.json",
+                  "PokeV-Recomp/zaimport/zaimport.exe",
+                  "PokeV-Recomp/zig/zig.exe",
+                  "PokeV-Recomp/za-default.ini",
+                  "PokeV-Recomp/lasgen/lasgen.exe",
+                  "PokeV-Recomp/zaprompts/zaprompts.exe",
+                  "PokeV-Recomp/gamelib-src/gamelib_entry.c",
+              ]
+              for req in required:
+                  assert req in names, f"Missing required ZIP entry: {req}"
+
+              dlls = [n for n in names if n.startswith("PokeV-Recomp/") and n.lower().endswith(".dll")]
+              assert len(dlls) > 0, "Expected bundled DLLs in PokeV-Recomp/"
+
+              forbidden_substrings = ("x264", "x265", "xvid", "postproc")
+              for n in names:
+                  low = n.lower()
+                  assert not any(bad in low for bad in forbidden_substrings), f"Forbidden GPL library in ZIP: {n}"
+                  assert not low.startswith("pokev-recomp/recompdata/"), f"Unexpected recompdata/ in ZIP: {n}"
+                  assert low != "pokev-recomp/larecomp.ini", f"Unexpected larecomp.ini in ZIP: {n}"
+
+              with tempfile.TemporaryDirectory() as tmp:
+                  tmp_dir = Path(tmp)
+                  extract_dir = tmp_dir / "unpacked"
+                  zf.extractall(extract_dir)
+                  app_dir = extract_dir / "PokeV-Recomp"
+                  exe = app_dir / "PokeV-Recomp.exe"
+                  assert exe.is_file()
+
+                  manifest = json.loads((app_dir / "recomplauncher.json").read_text(encoding="utf-8"))
+                  schema = json.loads(Path(os.environ["RUNNER_TEMP"], "recomplauncher.schema.json").read_text(encoding="utf-8"))
+                  jsonschema.validate(instance=manifest, schema=schema)
+                  assert manifest["repo"] == "didslima/PokeV-Recomp"
+                  assert manifest["prepare"]["program"][0] == "PokeV-Recomp.exe"
+                  assert manifest["start"]["program"][0] == "PokeV-Recomp.exe"
+
+                  def clean_env(extra):
+                      env = os.environ.copy()
+                      for k in ("LARECOMP_DATA_ROOT", "RECOMPLAUNCHER_DATA", "LARECOMP_NO_LAUNCHER",
+                                "LARECOMP_FORCE_LAUNCHER", "LARECOMP_INPUT", "RECOMPLAUNCHER"):
+                          env.pop(k, None)
+                      env.update(extra)
+                      return env
+
+                  # 1. Headless launcher-bypass smoke test (exit 3 + larecomp.ini creation)
+                  data1 = tmp_dir / "data_exit3"
+                  r1 = subprocess.run(
+                      [str(exe)],
+                      cwd=str(app_dir),
+                      env=clean_env({
+                          "LARECOMP_FORCE_LAUNCHER": "1",
+                          "LARECOMP_NO_LAUNCHER": "1",
+                          "RECOMPLAUNCHER_DATA": str(data1),
+                      }),
+                      capture_output=True, text=True, timeout=30,
+                  )
+                  assert r1.returncode == 3, f"Expected exit 3, got {r1.returncode}\nstdout={r1.stdout}\nstderr={r1.stderr}"
+                  assert (data1 / "larecomp.ini").is_file(), "larecomp.ini not created from za-default.ini"
+                  log1 = (data1 / "lasrecomp.log").read_text(encoding="utf-8", errors="replace")
+                  assert "LARECOMP_NO_LAUNCHER is set" in log1, f"Unexpected log1:\n{log1}"
+
+                  # 2. Headless --play smoke test (skips launcher, resolves RECOMPLAUNCHER_DATA, fails in boot without game files)
+                  data2 = tmp_dir / "data_play"
+                  r2 = subprocess.run(
+                      [str(exe), "--play"],
+                      cwd=str(app_dir),
+                      env=clean_env({
+                          "LARECOMP_NO_LAUNCHER": "1",
+                          "RECOMPLAUNCHER": "1",
+                          "RECOMPLAUNCHER_DATA": str(data2),
+                      }),
+                      capture_output=True, text=True, timeout=30,
+                  )
+                  assert r2.returncode != 0, "Expected non-zero exit when game files are missing"
+                  assert (data2 / "larecomp.ini").is_file(), "--play did not initialize larecomp.ini"
+                  log2 = (data2 / "lasrecomp.log").read_text(encoding="utf-8", errors="replace")
+                  assert "LARECOMP_NO_LAUNCHER is set" not in log2, "--play should skip launcher"
+
+                  # 3. --prepare CLI tests with non-proprietary fixtures
+                  data3 = tmp_dir / "prep_missing_game"
+                  r3 = subprocess.run(
+                      [str(exe), "--prepare", f"--data={data3}"],
+                      cwd=str(app_dir), env=clean_env({}), capture_output=True, text=True, timeout=30,
+                  )
+                  assert r3.returncode == 1, f"Expected exit 1, got {r3.returncode}"
+                  assert "No game path provided" in r3.stderr, r3.stderr
+                  assert data3.is_dir(), "--data did not create data directory"
+
+                  data4 = tmp_dir / "prep_empty_game"
+                  empty_game = tmp_dir / "empty_game"
+                  empty_game.mkdir()
+                  r4 = subprocess.run(
+                      [str(exe), "--prepare", "--data", str(data4), "--game", str(empty_game)],
+                      cwd=str(app_dir), env=clean_env({}), capture_output=True, text=True, timeout=30,
+                  )
+                  assert r4.returncode == 1, f"Expected exit 1, got {r4.returncode}"
+                  assert "game files" in r4.stderr.lower(), r4.stderr
+
+                  data5 = tmp_dir / "prep_bad_main"
+                  fake_game = tmp_dir / "fake_game"
+                  (fake_game / "exefs").mkdir(parents=True)
+                  (fake_game / "romfs").mkdir(parents=True)
+                  (fake_game / "exefs" / "main").write_bytes(b"NOT_NSO0" * 16)
+                  dummy_upd = tmp_dir / "upd.nsp"
+                  dummy_upd.write_bytes(b"")
+                  dummy_keys = tmp_dir / "prod.keys"
+                  dummy_keys.write_bytes(b"")
+                  r5 = subprocess.run(
+                      [str(exe), "--prepare", f"--data={data5}", f"--game={fake_game}",
+                       f"--update={dummy_upd}", f"--keys={dummy_keys}"],
+                      cwd=str(app_dir), env=clean_env({}), capture_output=True, text=True, timeout=30,
+                  )
+                  assert r5.returncode == 1, f"Expected exit 1 for invalid NSO main, got {r5.returncode}"
+                  assert not (data5 / "extracted" / "exefs").exists(), "Invalid game files must not be copied"
+
+          print("Windows ZIP validation, schema check, and headless CLI smoke tests passed")
+          PY
+
       - name: Upload Windows Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -213,6 +357,28 @@ jobs:
         run: |
           f=$(ls build/dist/*.AppImage | head -n 1)
           mv "$f" build/dist/PokeV-Recomp-linux-x86_64.AppImage
+
+      - name: Validate Linux AppDir Manifest & Entry Point
+        run: |
+          set -euo pipefail
+          test -x build/linux/x86_64/za-AppDir/AppRun
+          test -x build/linux/x86_64/za-AppDir/usr/bin/PokeV-Recomp
+          test -s build/linux/x86_64/za-AppDir/recomplauncher.json
+          SCHEMA_URL="https://raw.githubusercontent.com/elripalda/RecompLauncher/7d8bc7a59d472402ada20e2fff2fbbf806e10797/docs/recomplauncher.schema.json"
+          curl -fsSL "$SCHEMA_URL" -o "$RUNNER_TEMP/recomplauncher.schema.json"
+          python3 -m venv "$RUNNER_TEMP/linux-rl-venv"
+          "$RUNNER_TEMP/linux-rl-venv/bin/python" -m pip install -q jsonschema
+          RECOMPLAUNCHER_SCHEMA="$RUNNER_TEMP/recomplauncher.schema.json" REQUIRE_RECOMPLAUNCHER_SCHEMA=1 \
+            "$RUNNER_TEMP/linux-rl-venv/bin/python" -c '
+          import json, os, jsonschema
+          from pathlib import Path
+          manifest = json.loads(Path("build/linux/x86_64/za-AppDir/recomplauncher.json").read_text(encoding="utf-8"))
+          schema = json.loads(Path(os.environ["RECOMPLAUNCHER_SCHEMA"]).read_text(encoding="utf-8"))
+          jsonschema.validate(instance=manifest, schema=schema)
+          assert manifest["prepare"]["program"] == ["PokeV-Recomp.exe", "AppRun"]
+          assert manifest["start"]["program"] == ["PokeV-Recomp.exe", "AppRun"]
+          print("Linux AppDir recomplauncher.json and AppRun validated")
+          '
 
       - name: Upload Linux Artifact
         uses: actions/upload-artifact@v4

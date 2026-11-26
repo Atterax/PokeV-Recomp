@@ -278,6 +278,7 @@ jobs:
             tools/test_gamebuild_resume.py
             tools/test_game_identity.py
             tools/test_pace.py
+            tools/test_recomplauncher.py
             tools/test_regpromote.py
             tools/test_save.py
             tools/test_settings.py
@@ -335,6 +336,19 @@ jobs:
           print(f"=== Completed {len(tests)} tests across {workers} workers in {total_dur:.2f}s ===", flush=True)
           sys.exit(1 if failed else 0)
           PY
+
+      - name: Validate recomplauncher.json Against Official Schema
+        shell: bash
+        env:
+          PYTHONUTF8: "1"
+        run: |
+          set -euo pipefail
+          SCHEMA_URL="https://raw.githubusercontent.com/elripalda/RecompLauncher/7d8bc7a59d472402ada20e2fff2fbbf806e10797/docs/recomplauncher.schema.json"
+          curl -fsSL "$SCHEMA_URL" -o "$RUNNER_TEMP/recomplauncher.schema.json"
+          python3 -m venv "$RUNNER_TEMP/schema-venv"
+          if [ -x "$RUNNER_TEMP/schema-venv/Scripts/python.exe" ]; then SPY="$RUNNER_TEMP/schema-venv/Scripts/python.exe"; else SPY="$RUNNER_TEMP/schema-venv/bin/python"; fi
+          "$SPY" -m pip install -q jsonschema
+          RECOMPLAUNCHER_SCHEMA="$RUNNER_TEMP/recomplauncher.schema.json" REQUIRE_RECOMPLAUNCHER_SCHEMA=1 "$SPY" tools/test_recomplauncher.py
 
       # The generator's own packages (pinned as in the Makefile / tools/za scripts) in a venv of their own: the jump-table
       # test imports tools/gen.py, and it fails (never skips) without them.

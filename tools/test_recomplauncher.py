@@ -42,11 +42,24 @@ def test_manifest_and_schema():
         assert data[step]["program"] == ["PokeV-Recomp.exe", "AppRun"], f"{step}.program"
     assert data["saves"] == ["{data}/save/save_0"]
 
-    # External jsonschema CLI check if schema path is provided via RECOMPLAUNCHER_SCHEMA
-    cli = shutil.which("jsonschema")
+    # External jsonschema validation against the official RecompLauncher schema
+    # (pinned to elripalda/RecompLauncher@7d8bc7a59d472402ada20e2fff2fbbf806e10797).
     schema_env = os.environ.get("RECOMPLAUNCHER_SCHEMA")
-    if cli and schema_env and Path(schema_env).is_file():
-        subprocess.run([cli, "-i", str(manifest_path), schema_env], check=True)
+    require_schema = os.environ.get("REQUIRE_RECOMPLAUNCHER_SCHEMA") == "1"
+    if require_schema and (not schema_env or not Path(schema_env).is_file()):
+        raise AssertionError(f"REQUIRE_RECOMPLAUNCHER_SCHEMA=1 but RECOMPLAUNCHER_SCHEMA is missing: {schema_env!r}")
+    if schema_env and Path(schema_env).is_file():
+        try:
+            import jsonschema
+        except ImportError:
+            cli = shutil.which("jsonschema")
+            if cli:
+                subprocess.run([cli, "-i", str(manifest_path), schema_env], check=True)
+            elif require_schema:
+                raise
+        else:
+            schema = json.loads(Path(schema_env).read_text(encoding="utf-8"))
+            jsonschema.validate(instance=data, schema=schema)
 
 
 def test_settings_match_za_default_and_settings_c():
@@ -107,6 +120,22 @@ def test_runtime_cli_and_env_helpers():
 #include <stdlib.h>
 #include <string.h>
 
+static void rl_setenv(const char *k, const char *v) {
+#ifdef _WIN32
+    _putenv_s(k, v);
+#else
+    setenv(k, v, 1);
+#endif
+}
+
+static void rl_unsetenv(const char *k) {
+#ifdef _WIN32
+    _putenv_s(k, "");
+#else
+    unsetenv(k);
+#endif
+}
+
 static const char *data_root_env(void) {
     const char *env = getenv("LARECOMP_DATA_ROOT");
     if (env && *env) return env;
@@ -128,13 +157,23 @@ static bool take_flag_value(int argc, char **argv, int *idx, const char *name, c
 }
 
 int main(void) {
-    unsetenv("LARECOMP_DATA_ROOT");
-    unsetenv("RECOMPLAUNCHER_DATA");
+    const char *orig_la = getenv("LARECOMP_DATA_ROOT");
+    const char *orig_rl = getenv("RECOMPLAUNCHER_DATA");
+    char *saved_la = orig_la ? strdup(orig_la) : NULL;
+    char *saved_rl = orig_rl ? strdup(orig_rl) : NULL;
+
+    rl_unsetenv("LARECOMP_DATA_ROOT");
+    rl_unsetenv("RECOMPLAUNCHER_DATA");
     assert(data_root_env() == NULL);
-    setenv("RECOMPLAUNCHER_DATA", "/tmp/rl-data", 1);
+    rl_setenv("RECOMPLAUNCHER_DATA", "/tmp/rl-data");
     assert(strcmp(data_root_env(), "/tmp/rl-data") == 0);
-    setenv("LARECOMP_DATA_ROOT", "/tmp/la-data", 1);
+    rl_setenv("LARECOMP_DATA_ROOT", "/tmp/la-data");
     assert(strcmp(data_root_env(), "/tmp/la-data") == 0);
+
+    if (saved_la) { rl_setenv("LARECOMP_DATA_ROOT", saved_la); free(saved_la); }
+    else rl_unsetenv("LARECOMP_DATA_ROOT");
+    if (saved_rl) { rl_setenv("RECOMPLAUNCHER_DATA", saved_rl); free(saved_rl); }
+    else rl_unsetenv("RECOMPLAUNCHER_DATA");
 
     char *argv[] = {"PokeV-Recomp", "--prepare", "--game=/a/game.nsp", "--update", "/a/upd.nsp", "--keys=/a/prod.keys"};
     int argc = 6;
@@ -182,7 +221,10 @@ def test_path_overlap_guard():
         marker = nested / "main"
         marker.write_bytes(b"KEEP_ME")
         link = tmp / "link_to_dest"
-        link.symlink_to(dest)
+        try:
+            link.symlink_to(dest, target_is_directory=True)
+        except OSError:
+            link = dest  # Windows without Developer Mode: symlink creation may require privileges
 
         c_test = tmp / "test_overlap.c"
         c_test.write_text(
