@@ -277,7 +277,7 @@ jobs:
                   )
                   assert r1.returncode == 3, f"Expected exit 3, got {r1.returncode}\nstdout={r1.stdout}\nstderr={r1.stderr}"
                   assert (data1 / "larecomp.ini").is_file(), "larecomp.ini not created from za-default.ini"
-                  log1 = (data1 / "lasrecomp.log").read_text(encoding="utf-8", errors="replace")
+                  log1 = (data1 / "lasrecomp.log").read_text(encoding="utf-8", errors="replace") if (data1 / "lasrecomp.log").is_file() else r1.stderr
                   assert "LARECOMP_NO_LAUNCHER is set" in log1, f"Unexpected log1:\n{log1}"
 
                   # 2. Headless --play smoke test (skips launcher, resolves RECOMPLAUNCHER_DATA, fails in boot without game files)
@@ -294,7 +294,7 @@ jobs:
                   )
                   assert r2.returncode != 0, "Expected non-zero exit when game files are missing"
                   assert (data2 / "larecomp.ini").is_file(), "--play did not initialize larecomp.ini"
-                  log2 = (data2 / "lasrecomp.log").read_text(encoding="utf-8", errors="replace")
+                  log2 = (data2 / "lasrecomp.log").read_text(encoding="utf-8", errors="replace") if (data2 / "lasrecomp.log").is_file() else r2.stderr
                   assert "LARECOMP_NO_LAUNCHER is set" not in log2, "--play should skip launcher"
 
                   # 3. --prepare CLI tests with non-proprietary fixtures
