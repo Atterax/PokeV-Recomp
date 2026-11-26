@@ -233,16 +233,20 @@ jobs:
                   assert not non_vulkan_missing, f"Missing bundled DLLs in ZIP:\n{chr(10).join(non_vulkan_missing)}"
                   if any("vulkan-1" in m.lower() for m in missing):
                       import shutil
-                      ucrt_bin = next(
-                          (Path(p) for p in os.environ.get("PATH", "").split(os.pathsep)
-                           if "ucrt64" in p.lower() and Path(p).is_dir()),
-                          Path(shutil.which("clang")).parent,
-                      )
-                      for cand in (ucrt_bin / "vulkan-1.dll", ucrt_bin / "libvulkan-1.dll"):
-                          if cand.is_file():
-                              shutil.copy2(cand, app_dir / "vulkan-1.dll")
+                      search_dirs = [Path(p) for p in os.environ.get("PATH", "").split(os.pathsep) if p] + [
+                          Path(r"D:\a\_temp\msys64\ucrt64\bin"),
+                          Path(r"D:\a\_temp\setup-msys2\msys64\ucrt64\bin"),
+                          Path(r"C:\msys64\ucrt64\bin"),
+                      ]
+                      for d in search_dirs:
+                          for fname in ("vulkan-1.dll", "libvulkan-1.dll"):
+                              cand = d / fname
+                              if cand.is_file():
+                                  shutil.copy2(cand, app_dir / "vulkan-1.dll")
+                                  break
+                          if (app_dir / "vulkan-1.dll").is_file():
                               break
-                      assert (app_dir / "vulkan-1.dll").is_file(), f"Could not locate UCRT64 vulkan-1.dll in {ucrt_bin}"
+                      assert (app_dir / "vulkan-1.dll").is_file(), "Could not locate vulkan-1.dll / libvulkan-1.dll on runner"
 
                   manifest = json.loads((app_dir / "recomplauncher.json").read_text(encoding="utf-8"))
                   schema = json.loads(Path(os.environ["RUNNER_TEMP"], "recomplauncher.schema.json").read_text(encoding="utf-8"))
