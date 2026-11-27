@@ -266,6 +266,122 @@ void rt_sv_lua_frame_time(uint64_t L) {
     memcpy(dt, &v, sizeof v);
 }
 
+// Scarlet / Violet's scripts run some objects in fixed 1/30 s steps (lines 278989-279004): the object's time (its
+// [21]) gets clock slot 2's duration - this frame's time - and its update gets the whole 1/30 s steps in it. The indoor
+// camera's update (lines 279349-279422) approaches its target by f = its [41] (0.4) a step:
+// CD9AE7C27B00EB066.SF667EA15F51B1676, cur += (target - cur) * f, once per step. At 60 fps a step came every other
+// frame: the camera moved at 30 Hz behind a character moving at 60, and indoors the character shook on screen (at 30
+// fps it doesn't). From the native that hands the loop slot 2 (sv_patches.py _sv_lua_clock_slot), before the loop adds
+// it: that camera's time is set for one step now, and f to what this frame's time makes of a 1/30 s step's,
+// 1 - (1 - f)^(dt * 30) - the same approach in time at any frame rate, 30 fps's own at 30. The game's f is kept per
+// camera (taken again when the game sets another). 60 fps only; LARECOMP_SV_LUA_CAMERA=0: as before.
+static uint8_t *lua_index(uint64_t t, long i) {  // (Lua 5.4: t[i], array part, else the hash part)
+    if (!t) return NULL;
+    uint32_t alimit = *(const uint32_t *)(uintptr_t)(t + 0xc);
+    if (i >= 1 && (uint64_t)i <= alimit) {
+        uint64_t arr = *(const uint64_t *)(uintptr_t)(t + 0x10);
+        return arr ? (uint8_t *)(uintptr_t)(arr + 16ull * (uint64_t)(i - 1)) : NULL;
+    }
+    uint8_t lsizenode = *(const uint8_t *)(uintptr_t)(t + 0xb);
+    uint64_t node = *(const uint64_t *)(uintptr_t)(t + 0x18);
+    if (!node || lsizenode > 24) return NULL;
+    for (uint64_t k = 0; k < (1ull << lsizenode); k++) {
+        uint8_t *n = (uint8_t *)(uintptr_t)(node + 24 * k);
+        if (n[9] == 0x03 && *(const int64_t *)(n + 16) == i) return n;  // (an integer key)
+    }
+    return NULL;
+}
+static const uint8_t *lua_method(uint64_t t, const char *name) {  // (t.name, through the metatables' __index tables)
+    for (int depth = 0; t && depth < 8; depth++) {
+        const uint8_t *v = lua_find(t, name);
+        if (v) return v;
+        uint64_t mt = *(const uint64_t *)(uintptr_t)(t + 0x28);
+        const uint8_t *ix = mt ? lua_find(mt, "__index") : NULL;
+        if (!ix || (ix[8] & 0x0f) != 5) return NULL;
+        t = *(const uint64_t *)ix;
+    }
+    return NULL;
+}
+static struct { uint64_t t; double f30, set; } g_sv_cams[8];
+static int g_sv_ncams;
+static pthread_mutex_t g_sv_cam_lock = PTHREAD_MUTEX_INITIALIZER;
+RT_ON_RESET(sv_cam_reset) {
+    pthread_mutex_lock(&g_sv_cam_lock);
+    memset(g_sv_cams, 0, sizeof g_sv_cams);
+    g_sv_ncams = 0;
+    pthread_mutex_unlock(&g_sv_cam_lock);
+}
+void rt_sv_lua_clock_slot(uint64_t L, uint64_t slot, uint64_t s) {
+    static int on = -1;
+    pthread_mutex_lock(&g_sv_cam_lock);
+    if (on < 0) {
+        const char *e = ENV("LARECOMP_SV_LUA_CAMERA");
+        on = !e || atoi(e) != 0;
+        LOG("[pace] Scarlet / Violet indoor camera in steps of the frame: %s\n", on ? "on" : "off (LARECOMP_SV_LUA_CAMERA=0)");
+    }
+    if (!on || slot != 2 || !L || !s) {
+        pthread_mutex_unlock(&g_sv_cam_lock);
+        return;
+    }
+    uint64_t ci = *(const uint64_t *)(uintptr_t)(L + 0x20);  // (lua_State: ci - the native's; previous: its Lua caller)
+    uint64_t caller = ci ? *(const uint64_t *)(uintptr_t)(ci + 0x10) : 0;
+    uint64_t base = caller ? *(const uint64_t *)(uintptr_t)caller : 0;
+    if (!base) {
+        pthread_mutex_unlock(&g_sv_cam_lock);
+        return;
+    }
+    const uint8_t *self = (const uint8_t *)(uintptr_t)(base + 16);  // (its R0)
+    if ((self[8] & 0x0f) != 5) {
+        pthread_mutex_unlock(&g_sv_cam_lock);
+        return;
+    }
+    uint64_t t = *(const uint64_t *)self;
+    const uint8_t *m = t ? lua_method(t, "FC0150FC2959FFA71") : NULL;  // (the update the loop calls)
+    if (!m || (m[8] & 0x3f) != 6) {  // (a Lua closure)
+        pthread_mutex_unlock(&g_sv_cam_lock);
+        return;
+    }
+    uint64_t cl = *(const uint64_t *)m;
+    uint64_t p = cl ? *(const uint64_t *)(uintptr_t)(cl + 0x18) : 0;  // (its Proto)
+    if (!p || *(const int *)(uintptr_t)(p + 0x2c) != 279349 || *(const int *)(uintptr_t)(p + 0x18) != 243) {
+        pthread_mutex_unlock(&g_sv_cam_lock);
+        return;
+    }
+    uint8_t *acc = lua_index(t, 21), *fv = lua_index(t, 41);
+    if (!acc || !fv || acc[8] != 0x13 || fv[8] != 0x13) {  // (floats)
+        pthread_mutex_unlock(&g_sv_cam_lock);
+        return;
+    }
+    int i = 0;
+    while (i < g_sv_ncams && g_sv_cams[i].t != t) i++;
+    if (i == g_sv_ncams) {
+        if (g_sv_ncams == 8) i = 0; else g_sv_ncams++;
+        g_sv_cams[i].t = t;
+        g_sv_cams[i].set = -1;
+    }
+    double cur = 0;
+    memcpy(&cur, fv, 8);
+    if (cur != g_sv_cams[i].set) g_sv_cams[i].f30 = cur;  // (the game's own: new, or set again)
+    if (!rt_pla_is_60fps()) {  // (30 fps: the game's own again)
+        if (g_sv_cams[i].set >= 0) {
+            memcpy(fv, &g_sv_cams[i].f30, 8);
+            g_sv_cams[i].set = -1;
+        }
+        pthread_mutex_unlock(&g_sv_cam_lock);
+        return;
+    }
+    double dur = (double)*(const uint64_t *)(uintptr_t)(s + 8) / 1e9;
+    if (!isfinite(dur) || !(dur > 0 && dur < 1) || !isfinite(g_sv_cams[i].f30) || !(g_sv_cams[i].f30 > 0 && g_sv_cams[i].f30 < 1)) {
+        pthread_mutex_unlock(&g_sv_cam_lock);
+        return;
+    }
+    double f = 1.0 - pow(1.0 - g_sv_cams[i].f30, dur * 30.0), time = 1.0 / 30 - dur + 1e-9;  // (one step: time + dur >= 1/30)
+    g_sv_cams[i].set = f;
+    memcpy(fv, &f, 8);
+    memcpy(acc, &time, 8);
+    pthread_mutex_unlock(&g_sv_cam_lock);
+}
+
 // Scarlet / Violet's sequence players (sv_patches.py _sv_timeline_time) - the catch's camera work, cutscenes, UI
 // animations - step in 30 fps frames, by slot 1 / (33.3 ms - 1 ns), and each track is a clip from one whole frame to
 // another (start <= t < end). At 30 fps they are only ever sampled at whole frames. At 60 fps they are also sampled half
