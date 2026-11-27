@@ -280,59 +280,88 @@ void rt_sv_lua_frame_time(uint64_t L) {
 // are the clip's first frame and its end (as 0x7000b845c0 reads them). LARECOMP_SV_TIMELINE_SNAP=0: as before;
 // LARECOMP_LOG_TIMELINE_SNAP=1 logs each one.
 static uint32_t fb_u32(uint64_t tbl, uint32_t voff, uint32_t def) {
-    uint64_t vt = tbl - (int64_t)*(const int32_t *)(uintptr_t)tbl;
-    uint16_t vsize = *(const uint16_t *)(uintptr_t)vt;
-    if (vsize <= voff) return def;
-    uint16_t o = *(const uint16_t *)(uintptr_t)(vt + voff);
-    return o ? *(const uint32_t *)(uintptr_t)(tbl + o) : def;
+    if (tbl < 0x10000) return def;
+    int32_t soff = 0;
+    memcpy(&soff, (const void *)(uintptr_t)tbl, sizeof soff);
+    if (soff == 0) return def;
+    uint64_t vt = tbl - (int64_t)soff;
+    if (vt < 0x10000) return def;
+    uint16_t vsize = 0;
+    memcpy(&vsize, (const void *)(uintptr_t)vt, sizeof vsize);
+    if (vsize < 4 || voff + 2 > vsize) return def;
+    uint16_t o = 0;
+    memcpy(&o, (const void *)(uintptr_t)(vt + voff), sizeof o);
+    if (o < 4) return def;
+    uint32_t val = 0;
+    memcpy(&val, (const void *)(uintptr_t)(tbl + o), sizeof val);
+    return val;
 }
 static float tl_moment_end(uint64_t player, float t) {  // (the end of a one-frame clip t is inside, between whole frames - or
     // its start when t is only a float step's error past it; 0: none)
-    if (t == floorf(t)) return 0;
+    if (!isfinite(t) || t < 0.0f || t == floorf(t) || player < 0x10000) return 0;
     uint64_t mgr = player + 0xe0;
     static const uint32_t lists[2][2] = {{0x50, 0x58}, {0x18, 0x20}};
     for (int l = 0; l < 2; l++) {
-        uint64_t b = *(const uint64_t *)(uintptr_t)(mgr + lists[l][0]), e = *(const uint64_t *)(uintptr_t)(mgr + lists[l][1]);
-        if (!b || e < b || (e - b) / 0x1d0 > 4096) continue;
-        for (uint64_t tr = b; tr < e; tr += 0x1d0) {
-            uint64_t tbl = *(const uint64_t *)(uintptr_t)tr;
-            if (!tbl) continue;
+        uint64_t b = 0, e = 0;
+        memcpy(&b, (const void *)(uintptr_t)(mgr + lists[l][0]), sizeof b);
+        memcpy(&e, (const void *)(uintptr_t)(mgr + lists[l][1]), sizeof e);
+        if (b < 0x10000 || e < b || (e - b) / 0x1d0 > 4096) continue;
+        for (uint64_t tr = b; tr + 0x1d0 <= e; tr += 0x1d0) {
+            uint64_t tbl = 0;
+            memcpy(&tbl, (const void *)(uintptr_t)tr, sizeof tbl);
+            if (tbl < 0x10000) continue;
             uint32_t s0 = fb_u32(tbl, 8, 0), e0 = fb_u32(tbl, 0xa, 0);
             if (e0 == s0 + 1 && (float)s0 <= t && t < (float)e0) return t - (float)s0 < 0.02f ? (float)s0 : (float)e0;
         }
     }
     return 0;
 }
+enum { SV_TL_SLOTS = 32 };
+static struct { uint64_t player; float owed, last; } g_tl_owe[SV_TL_SLOTS];
+static pthread_mutex_t g_tl_lock = PTHREAD_MUTEX_INITIALIZER;
+RT_ON_RESET(sv_timeline_reset) {
+    pthread_mutex_lock(&g_tl_lock);
+    memset(g_tl_owe, 0, sizeof g_tl_owe);
+    pthread_mutex_unlock(&g_tl_lock);
+}
 float rt_sv_timeline_time(uint64_t player, float t, float step) {
-    static int on = -1, log;
+    static int on = -1, log = 0;
+    pthread_mutex_lock(&g_tl_lock);
     if (on < 0) {
         const char *e = ENV("LARECOMP_SV_TIMELINE_SNAP");
-        on = !e || atoi(e) != 0, log = ENV("LARECOMP_LOG_TIMELINE_SNAP") != NULL;
+        on = !e || atoi(e) != 0;
+        log = ENV("LARECOMP_LOG_TIMELINE_SNAP") != NULL;
         LOG("[pace] Scarlet / Violet one-frame sequence clips played as moments at 60 fps: %s\n", on ? "on" : "off (LARECOMP_SV_TIMELINE_SNAP=0)");
     }
-    if (!on || !rt_pla_is_60fps()) return t;
-    // (the half frames owed, per player: a few players run at once; several threads may step them)
-    enum { N = 32 };
-    static struct { uint64_t player; float owed, last; } owe[N];
-    static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
-    pthread_mutex_lock(&lock);
+    if (!on || !rt_pla_is_60fps() || !isfinite(t) || t < 0.0f) {
+        pthread_mutex_unlock(&g_tl_lock);
+        return t;
+    }
     int slot = -1;
-    for (int i = 0; i < N; i++) if (owe[i].player == player) { slot = i; break; }
-    if (slot >= 0 && owe[slot].owed > 0) {  // (gained last time: hold, at most back to where it was played)
-        float back = t - owe[slot].owed;
-        t = back > owe[slot].last ? back : owe[slot].last;
-        owe[slot].player = 0;
+    for (int i = 0; i < SV_TL_SLOTS; i++) if (g_tl_owe[i].player == player) { slot = i; break; }
+    if (slot >= 0 && g_tl_owe[slot].owed > 0) {
+        // Only pay back the owed half-frame if this looks like the next step of the same sequence
+        // (guards against restarted sequences or reused player addresses jumping forward to stale `last`).
+        if (t >= g_tl_owe[slot].last - 0.5f && t <= g_tl_owe[slot].last + 2.0f) {
+            float back = t - g_tl_owe[slot].owed;
+            t = back > g_tl_owe[slot].last ? back : g_tl_owe[slot].last;
+        }
+        g_tl_owe[slot].player = 0;
+        g_tl_owe[slot].owed = 0;
+        g_tl_owe[slot].last = 0;
     }
     float end = tl_moment_end(player, t);
     if (end > 0 && end <= t) t = end;  // (a float step's error past a whole frame: that frame)
     else if (end > t) {
         if (log) LOG("[pace] sequence player %llx: %.3f inside a one-frame clip, played at %.0f\n", (unsigned long long)player, t, end);
-        if (slot < 0) for (int i = 0; i < N; i++) if (!owe[i].player) { slot = i; break; }
-        if (slot < 0) slot = (int)(player >> 4) % N;
-        owe[slot].player = player, owe[slot].owed = end - t, owe[slot].last = end;
+        if (slot < 0) for (int i = 0; i < SV_TL_SLOTS; i++) if (!g_tl_owe[i].player) { slot = i; break; }
+        if (slot < 0) slot = (int)(player >> 4) % SV_TL_SLOTS;
+        g_tl_owe[slot].player = player;
+        g_tl_owe[slot].owed = end - t;
+        g_tl_owe[slot].last = end;
         t = end;
     }
-    pthread_mutex_unlock(&lock);
+    pthread_mutex_unlock(&g_tl_lock);
     (void)step;
     return t;
 }
