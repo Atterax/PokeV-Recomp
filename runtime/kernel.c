@@ -39,10 +39,16 @@ static inline void kspin_relax(void) {  // (a spin-wait's pause: the core's othe
 // g_klock taken by the kernel calls: a short spin on trylock first. Every guest thread's waits and signals go through
 // it - a few hundred thousand a second while the game loads - and the C library's mutex puts a thread that finds it
 // held to sleep, a wake-up of tens of microseconds for a lock held a microsecond or two. LARECOMP_KLOCK_SPIN=0: plain.
+static int g_klock_spin;
+static pthread_once_t g_klock_spin_once = PTHREAD_ONCE_INIT;
+static void init_klock_spin(void) {
+    const char *e = getenv("LARECOMP_KLOCK_SPIN");
+    int v = e ? atoi(e) : 2000;
+    g_klock_spin = v > 0 ? v : 0;
+}
 static void klock(void) {
-    static int spin = -1;
-    if (spin < 0) spin = getenv("LARECOMP_KLOCK_SPIN") ? atoi(getenv("LARECOMP_KLOCK_SPIN")) : 2000;
-    for (int i = 0; i < spin; i++) {
+    pthread_once(&g_klock_spin_once, init_klock_spin);
+    for (int i = 0; i < g_klock_spin; i++) {
         if (pthread_mutex_trylock(&g_klock) == 0) return;
         kspin_relax();
     }
@@ -479,7 +485,7 @@ static void mutex_release(uint64_t addr) {
         return;
     }
     __atomic_store_n(u32p(addr), next->handle | (count > 1 ? WAITERS_BIT : 0), __ATOMIC_SEQ_CST);
-    next->wait_kind = WAIT_NONE;
+    __atomic_store_n(&next->wait_kind, WAIT_NONE, __ATOMIC_RELEASE);
     next->wait_result = R_OK;
     wake(next);
 }
@@ -509,6 +515,14 @@ static void waitlist_remove(KThread *t) {
 // is for the thread's next WaitSynchronization only. Ending them used the flag up there (a cancel meant to wake a
 // thread out of a WaitSynchronization could be lost), and the SDK's untimed condition variable wait treats any
 // result but success as fatal.
+static long g_kwait_spin_ns;
+static pthread_once_t g_kwait_spin_once = PTHREAD_ONCE_INIT;
+static void init_kwait_spin(void) {
+    const char *e = getenv("LARECOMP_KWAIT_SPIN_US");
+    long us = e ? atol(e) : 30;
+    g_kwait_spin_ns = us > 0 ? us * 1000L : 0L;
+}
+
 static uint32_t block_current(int64_t timeout_ns) {
     KThread *t = t_cur;
     struct timespec ts;
@@ -521,23 +535,28 @@ static uint32_t block_current(int64_t timeout_ns) {
     // other through these waits thousands of times a second while they load (a Poké Ball throw: ~14,000 address-arbiter
     // waits a thread in 2 s, ~280 ms of wake-ups that held the frame's jobs up); a hand-off within the spin costs none.
     // LARECOMP_KWAIT_SPIN_US=<us> (default 30; 0: sleep at once, as before).
-    static long spin_ns = -1;
-    if (spin_ns < 0) spin_ns = (getenv("LARECOMP_KWAIT_SPIN_US") ? atol(getenv("LARECOMP_KWAIT_SPIN_US")) : 30) * 1000;
-    if (spin_ns > 0 && timeout_ns != 0 && !g_rt_unwind) {
+    pthread_once(&g_kwait_spin_once, init_kwait_spin);
+    long spin_budget = g_kwait_spin_ns;
+    if (timeout_ns > 0 && timeout_ns < spin_budget) spin_budget = (long)timeout_ns;
+    if (spin_budget > 0 && timeout_ns != 0 && !__atomic_load_n(&g_rt_unwind, __ATOMIC_ACQUIRE)) {
         pthread_mutex_unlock(&g_klock);
-        uint64_t until = t->wait_since + (uint64_t)spin_ns;
-        while (__atomic_load_n(&t->wait_kind, __ATOMIC_ACQUIRE) != WAIT_NONE && plat_now_ns() < until) kspin_relax();
+        uint64_t until = t->wait_since + (uint64_t)spin_budget;
+        while (__atomic_load_n(&t->wait_kind, __ATOMIC_ACQUIRE) != WAIT_NONE &&
+               !__atomic_load_n(&g_rt_unwind, __ATOMIC_ACQUIRE) &&
+               plat_now_ns() < until) {
+            kspin_relax();
+        }
         klock();
     }
     while (t->wait_kind != WAIT_NONE) {
-        if (g_rt_unwind) {  // reboot: give up the wait (the thread unwinds when its svc returns)
-            t->wait_kind = WAIT_NONE;
+        if (__atomic_load_n(&g_rt_unwind, __ATOMIC_ACQUIRE)) {  // reboot: give up the wait (the thread unwinds when its svc returns)
+            __atomic_store_n(&t->wait_kind, WAIT_NONE, __ATOMIC_RELEASE);
             t->wait_result = R_CANCELLED;
             break;
         }
         if (!kwait(timeout_ns, &ts)) {
             if (t->wait_kind == WAIT_NONE) break;  // (woken just as the time ran out: the waker's result stands)
-            t->wait_kind = WAIT_NONE;
+            __atomic_store_n(&t->wait_kind, WAIT_NONE, __ATOMIC_RELEASE);
             t->wait_result = R_TIMEOUT;
             break;
         }
@@ -581,7 +600,7 @@ static uint32_t svc_arbitrate_lock(uint32_t owner, uint64_t addr, uint32_t tag) 
         return R_OK;
     }
     KThread *t = t_cur;
-    t->wait_kind = WAIT_MUTEX;
+    __atomic_store_n(&t->wait_kind, WAIT_MUTEX, __ATOMIC_RELEASE);
     t->wait_addr = addr;
     t->wait_tag = tag;
     uint32_t r = block_current(-1);
@@ -612,7 +631,7 @@ static uint32_t svc_wait_process_wide_key(uint64_t mutex, uint64_t key, uint32_t
     mutex_release(mutex);
     bool traced = !kt_timed_key(key, timeout >= 0);
     if (traced) kt(KT_WAIT, key, mutex, kbefore, mbefore, rdw(mutex), 0xffffffffu);
-    t->wait_kind = WAIT_CONDVAR;
+    __atomic_store_n(&t->wait_kind, WAIT_CONDVAR, __ATOMIC_RELEASE);
     t->wait_addr = key;
     t->wait_mutex = mutex;
     t->wait_tag = tag;
@@ -621,7 +640,7 @@ static uint32_t svc_wait_process_wide_key(uint64_t mutex, uint64_t key, uint32_t
         // signaled (moved to the mutex's waiters) before the timeout: the kernel hands it the mutex as usual
         r = R_OK;
         if ((LD32(mutex) & ~WAITERS_BIT) != tag && !mutex_acquire_or_mark(mutex, tag)) {
-            t->wait_kind = WAIT_MUTEX;
+            __atomic_store_n(&t->wait_kind, WAIT_MUTEX, __ATOMIC_RELEASE);
             block_current(-1);
         }
     }
@@ -649,10 +668,10 @@ static void svc_signal_process_wide_key(uint64_t key, int32_t count) {
         uint64_t m = best->wait_mutex;
         best->wait_result = R_OK;
         if (mutex_acquire_or_mark(m, best->wait_tag)) {
-            best->wait_kind = WAIT_NONE;
+            __atomic_store_n(&best->wait_kind, WAIT_NONE, __ATOMIC_RELEASE);
             wake(best);
         } else {
-            best->wait_kind = WAIT_MUTEX;
+            __atomic_store_n(&best->wait_kind, WAIT_MUTEX, __ATOMIC_RELEASE);
             best->wait_addr = m;
         }
     }
@@ -684,7 +703,7 @@ static uint32_t svc_wait_for_address(uint64_t addr, uint32_t type, int32_t value
     else { pthread_mutex_unlock(&g_klock); return R_INVALID_ENUM; }
     if (!wait) { pthread_mutex_unlock(&g_klock); return R_INVALID_STATE; }
     if (timeout == 0) { pthread_mutex_unlock(&g_klock); return R_TIMEOUT; }
-    t_cur->wait_kind = WAIT_ARBITER;
+    __atomic_store_n(&t_cur->wait_kind, WAIT_ARBITER, __ATOMIC_RELEASE);
     t_cur->wait_addr = addr;
     uint32_t r = block_current(timeout);
     pthread_mutex_unlock(&g_klock);
@@ -698,7 +717,7 @@ static int arbiter_wake(uint64_t addr, int32_t count) {  // (the most urgent wai
         for (KThread *t = g_waitlist; t; t = t->wnext)
             if (t->wait_kind == WAIT_ARBITER && t->wait_addr == addr && (!best || t->prio < best->prio)) best = t;
         if (!best) break;
-        best->wait_kind = WAIT_NONE;
+        __atomic_store_n(&best->wait_kind, WAIT_NONE, __ATOMIC_RELEASE);
         best->wait_result = R_OK;
         wake(best);
         woken++;
@@ -1114,7 +1133,7 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
 
 // Reboot, step 1: stop every guest thread (see rt_unwind_point) and join it. `idle` keeps the window responsive.
 void kernel_stop_threads(void (*idle)(void)) {
-    g_rt_unwind = 1;
+    __atomic_store_n(&g_rt_unwind, 1, __ATOMIC_RELEASE);
     uint64_t t0 = plat_now_ns(), logged = t0;
     for (;;) {
         int live = 0;
