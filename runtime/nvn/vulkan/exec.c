@@ -8171,16 +8171,23 @@ static void draw_(CmdRec *r, bool indexed) {
     uint8_t a2c_in = a2c_draw_env ? (atoi(a2c_draw_env) != 0) : ((pass_samples > 1) ? (st.ms[0xC] != 0) : 0);
     const PipeIn in = {st.attrib, st.nattrib, (const uint32_t (*)[2])st.stream, st.nstream, rt_fmt, st.channel_mask,
                        st.color_state[0], (const uint8_t (*)[8])st.blend, a2c_in, cls, st.poly[2] != 1};
-    // the key's parts draw_ adds to pipe_key_fill's: the depth clamp (in depth-only passes - shadow maps: the casters past
-    // the light's planes - and in passes without depth - the UI: its quads ask for it, and some lie outside the depth
-    // range, the item-count window after using a candy stayed hidden; not in colour passes with depth: Vulkan's clamp
-    // also turns off near clipping, and a big mesh with triangles behind the camera spread across the screen as huge
-    // dark sheets; but in colour passes onto a square depth target - Pokémon Z-A's sun shadow maps, 1024x1024 x 3
-    // cascades drawn with an 8-bit colour target beside: unclamped, the buildings past the nearest cascade's light planes
-    // were clipped from it and their shadows cut off at a line that moved with the player, #43), primitive restart and
-    // the depth / stencil state in the pipeline on Vulkan 1.2 drivers
-    static int noclamp = -1, clamp_color = -1;  // LARECOMP_VK_NO_DEPTH_CLAMP=1: ignored; LARECOMP_VK_CLAMP_COLOR=1: in every pass
-    if (noclamp < 0) noclamp = ENV("LARECOMP_VK_NO_DEPTH_CLAMP") != NULL, clamp_color = ENV("LARECOMP_VK_CLAMP_COLOR") != NULL;
+    // the key's parts draw_ adds to pipe_key_fill's: the depth clamp, wherever the game asks for it (shadow maps: the
+    // casters past the light's planes; the UI: its quads, some outside the depth range - clipped, the item-count window
+    // after using a candy stayed hidden; Pokémon Z-A's sun shadow cascades, #43), primitive restart and the depth /
+    // stencil state in the pipeline on Vulkan 1.2 drivers. Colour passes with depth had it off until v0.0.29 (Vulkan's
+    // clamp also turns off near clipping - huge dark sheets in Z-A's plaza at night, from the same days as the GPU-culled
+    // draws' wrong index ranges that drew such sheets, 4f30030). But Scarlet / Violet draws its terrain in a depth-only
+    // pre-pass and then in the G-buffer with an EQUAL test, both clamped: the ground nearer than the near plane (the
+    // catch camera, at ground level) got a clamped depth in the pre-pass and was clipped in the G-buffer - the ground
+    // under the Poké Ball black, with stripes at its edge. LARECOMP_VK_CLAMP_COLOR=0: as before (not in colour passes
+    // with depth, except onto a square depth target); LARECOMP_VK_NO_DEPTH_CLAMP=1: never.
+    static int noclamp = -1, clamp_color = -1;
+    if (noclamp < 0) {
+        const char *nc = ENV("LARECOMP_VK_NO_DEPTH_CLAMP");
+        const char *cc = ENV("LARECOMP_VK_CLAMP_COLOR");
+        noclamp = nc && atoi(nc) != 0;
+        clamp_color = !cc || atoi(cc) != 0;
+    }
     bool square_depth = st.rt.depth && st.rt.depth->width == st.rt.depth->height;
     uint8_t dclamp = st.depth_clamp && !noclamp && (!pass_ncolor || !pass_depth || square_depth || clamp_color);
     uint8_t restart = g_vkc.no_eds2 && st.prim_restart && native && (mode == 3 || mode == 5);  // (as SS_PRE below)
