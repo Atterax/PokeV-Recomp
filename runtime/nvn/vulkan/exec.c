@@ -8173,8 +8173,10 @@ static void draw_(CmdRec *r, bool indexed) {
     // with depth, except onto a square depth target); LARECOMP_VK_NO_DEPTH_CLAMP=1: never.
     static int noclamp = -1, clamp_color = -1;
     if (noclamp < 0) {
-        noclamp = ENV("LARECOMP_VK_NO_DEPTH_CLAMP") != NULL;
-        clamp_color = !ENV("LARECOMP_VK_CLAMP_COLOR") || atoi(ENV("LARECOMP_VK_CLAMP_COLOR")) != 0;
+        const char *nc = ENV("LARECOMP_VK_NO_DEPTH_CLAMP");
+        const char *cc = ENV("LARECOMP_VK_CLAMP_COLOR");
+        noclamp = nc && atoi(nc) != 0;
+        clamp_color = !cc || atoi(cc) != 0;
     }
     bool square_depth = st.rt.depth && st.rt.depth->width == st.rt.depth->height;
     uint8_t dclamp = st.depth_clamp && !noclamp && (!pass_ncolor || !pass_depth || square_depth || clamp_color);
