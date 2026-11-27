@@ -2218,7 +2218,13 @@ extern "C" void launcher_run(const char *root) {
     if (!update_checked) {
         update_checked = true;
         updater_configure(LARECOMP_VERSION, rt_data_root(), false, false);
-        updater_start_check(false);
+        if (updater_get_snapshot().recovery_pending) {
+            if (updater_launch_windows_recovery_and_exit_ready()) {
+                updater_shutdown();
+                exit(0);
+            }
+        }
+        if (!updater_is_recovery_blocked()) updater_start_check(false);
 #ifdef _WIN32
         pthread_t t;
         if (pthread_create(&t, NULL, upd_cleanup, NULL) == 0) pthread_detach(t);
@@ -2708,8 +2714,24 @@ extern "C" void launcher_run(const char *root) {
                     cx += chip(dl, cx, ty, IC_LAYERS, mods_t) + 8;
                     if (g_save_time) chip(dl, cx, ty, IC_SAVE, std::string(TR("Save from ", "Save de ")) + fmt_time(g_save_time));
                     ty += 34 + 34;
-                    bool pressed = button("##play", TR("PLAY", "JOGAR"), x, ty, 0, 68, BTN_PRIMARY, true, IC_PLAY, F_BTN, 26);
-                    if (g_focus_play) ImGui::SetKeyboardFocusHere(-1), g_focus_play = false;
+                    bool rec_blocked = updater_is_recovery_blocked();
+                    if (rec_blocked) {
+                        UpdaterSnapshot rs = updater_get_snapshot();
+                        float bh = 112;
+                        panel(dl, x, ty - 12, w, bh);
+                        dl->AddRect(P(x, ty - 12), P(x + w, ty - 12 + bh), IM_COL32(255, 108, 108, 180), 14 * g_s, 0, 1.5f * g_s);
+                        text(dl, F_LABEL, 14, x + 20, ty, C_RED,
+                             TR("UPDATE RECOVERY REQUIRED · PLAY DISABLED",
+                                "RECUPERAÇÃO DE ATUALIZAÇÃO NECESSÁRIA · JOGAR DESATIVADO"));
+                        std::string rmsg = !rs.install_error.empty()
+                            ? rs.install_error
+                            : std::string(TR("An interrupted update left this installation incomplete. Restore .PokeV-Recomp.update.bak or reinstall.",
+                                             "Uma atualização interrompida deixou esta instalação incompleta. Restaure .PokeV-Recomp.update.bak ou reinstale."));
+                        text(dl, F_BODY, 14, x + 20, ty + 24, C_TEXT, rmsg.c_str(), w - 40);
+                        ty += bh + 10;
+                    }
+                    bool pressed = button("##play", TR("PLAY", "JOGAR"), x, ty, 0, 68, BTN_PRIMARY, !rec_blocked, IC_PLAY, F_BTN, 26);
+                    if (g_focus_play && !rec_blocked) ImGui::SetKeyboardFocusHere(-1), g_focus_play = false;
                     float pw = ImGui::GetItemRectSize().x / g_s;
                     if (button("##chg", TR("Change game folder", "Trocar pasta do jogo"), x + pw + 14, ty + 8, 0, 52, BTN_SECONDARY,
                                true, IC_FOLDER)) {
@@ -2734,7 +2756,13 @@ extern "C" void launcher_run(const char *root) {
                     }
                     party_icons_kick();
                     party_panel(dl, x, ty + 68 + 34, w);
-                    if (g_play_pending) pressed = true, g_play_pending = false;
+                    if (rec_blocked) {
+                        pressed = false;
+                        g_play_pending = false;
+                        bar = {C_RED, TR("Update recovery required — Play disabled",
+                                         "Recuperação de atualização necessária — Jogar desativado")};
+                    }
+                    if (!rec_blocked && g_play_pending) pressed = true, g_play_pending = false;
                     // (a settings file from before the recommendation that already holds it: nothing to offer)
                     if (g_settings.video_rec == VREC_ASK && g_video_rec.known && settings_video_matches_recommended())
                         g_settings.video_rec = VREC_DONE, settings_save();
@@ -3223,6 +3251,13 @@ extern "C" void launcher_run(const char *root) {
                     float mx = right_x - ms.x, my = H_ - 24 - ms.y / 2;
                     dl->AddCircleFilled(P(mx - 12, H_ - 24), 4.5f * g_s, C_TEAL);
                     text(dl, F_LABEL, 14, mx, my, C_TEAL, m.c_str());
+                } else if (!us.update_notice.empty() && upd.empty() && ust == UPD_IDLE) {
+                    const char *nm = TR("Update interrupted — previous version restored",
+                                        "Atualização interrompida — versão anterior restaurada");
+                    ImVec2 ms = text_size(F_LABEL, 14, nm);
+                    float mx = right_x - ms.x, my = H_ - 24 - ms.y / 2;
+                    dl->AddCircleFilled(P(mx - 12, H_ - 24), 4.5f * g_s, C_TEAL);
+                    text(dl, F_LABEL, 14, mx, my, C_TEAL, nm);
                 }
 
                 float modal_w = std::min(880.0f, std::max(360.0f, W_ - 60.0f));
@@ -3389,7 +3424,10 @@ extern "C" void launcher_run(const char *root) {
                     ImGui::Spacing();
 
                     if (ms.state == UPD_CHK_AVAILABLE) {
-                        if (ms.install_kind == UPD_INSTALL_LINUX_APPIMAGE) {
+                        bool is_win_zip = (ms.install_kind == UPD_INSTALL_WINDOWS_ZIP);
+                        bool is_lin_app = (ms.install_kind == UPD_INSTALL_LINUX_APPIMAGE);
+                        if (is_lin_app || is_win_zip) {
+                            const std::string &asset_url = is_win_zip ? ms.windows_asset_url : ms.linux_asset_url;
                             if (ms.install_state == UPD_INST_DOWNLOADING) {
                                 float frac = ms.total_bytes > 0 ? (float)ms.downloaded_bytes / (float)ms.total_bytes : 0.0f;
                                 if (frac > 1.0f) frac = 1.0f;
@@ -3407,8 +3445,11 @@ extern "C" void launcher_run(const char *root) {
                                                    TR("Verifying SHA-256 checksum...", "Verificando checksum SHA-256..."));
                             } else if (ms.install_state == UPD_INST_STAGED) {
                                 ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.85f, 1), "%s",
-                                                   TR("Verified (SHA-256 OK). Ready to replace AppImage and restart.",
-                                                      "Verificado (SHA-256 OK). Pronto para substituir o AppImage e reiniciar."));
+                                                   is_win_zip
+                                                       ? TR("Verified (SHA-256 OK). Ready to install update and restart.",
+                                                            "Verificado (SHA-256 OK). Pronto para instalar a atualização e reiniciar.")
+                                                       : TR("Verified (SHA-256 OK). Ready to replace AppImage and restart.",
+                                                            "Verificado (SHA-256 OK). Pronto para substituir o AppImage e reiniciar."));
                                 if (ImGui::Button(TR("Install & Restart", "Instalar e reiniciar"), ImVec2(220 * g_s, 0))) {
                                     if (updater_launch_external_apply_and_exit_ready()) {
                                         updater_shutdown();
@@ -3416,9 +3457,9 @@ extern "C" void launcher_run(const char *root) {
                                     }
                                 }
                                 ImGui::SameLine();
-                            } else if (!ms.linux_asset_url.empty() && !ms.sha256sums_url.empty()) {
+                            } else if (!asset_url.empty() && !ms.sha256sums_url.empty()) {
                                 if (ImGui::Button(TR("Download & Update", "Baixar e atualizar"), ImVec2(200 * g_s, 0)))
-                                    ImGui::OpenPopup("##updconfirm_linux");
+                                    ImGui::OpenPopup("##updconfirm_install");
                                 ImGui::SameLine();
                             }
                         } else if (!ms.install_reason.empty()) {
@@ -3427,19 +3468,30 @@ extern "C" void launcher_run(const char *root) {
                     }
 
                     ImGui::SetNextWindowPos(P(W_ / 2, H_ / 2), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-                    if (ImGui::BeginPopupModal("##updconfirm_linux", NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar)) {
+                    if (ImGui::BeginPopupModal("##updconfirm_install", NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar)) {
+                        bool is_win_zip = (ms.install_kind == UPD_INSTALL_WINDOWS_ZIP);
+                        uint64_t asset_sz = is_win_zip ? ms.windows_asset_size : ms.linux_asset_size;
                         ImGui::PushFont(g_font_menu);
                         ImGui::TextColored(ImVec4(1, 0.72f, 0.4f, 1), "%s",
-                                           (std::string(TR("Update AppImage to ", "Atualizar AppImage para ")) +
+                                           (std::string(is_win_zip
+                                                            ? TR("Update PokeV-Recomp to ", "Atualizar PokeV-Recomp para ")
+                                                            : TR("Update AppImage to ", "Atualizar AppImage para ")) +
                                             updater_tag_label(ms.latest_tag, false) + "?").c_str());
                         ImGui::PopFont();
-                        if (ms.linux_asset_size > 0)
-                            ImGui::Text(TR("Downloads %.1f MB from GitHub, verifies SHA-256, backs up your current AppImage and restarts.",
-                                           "Baixa %.1f MB do GitHub, verifica o SHA-256, faz backup do AppImage atual e reinicia."),
-                                        ms.linux_asset_size / 1e6);
-                        else
-                            ImGui::Text("%s", TR("Downloads the new AppImage from GitHub, verifies SHA-256, backs up the current one and restarts.",
-                                                 "Baixa o novo AppImage do GitHub, verifica o SHA-256, faz backup do atual e reinicia."));
+                        if (asset_sz > 0) {
+                            ImGui::Text(is_win_zip
+                                            ? TR("Downloads %.1f MB from GitHub, verifies SHA-256, backs up current app files and restarts.",
+                                                 "Baixa %.1f MB do GitHub, verifica o SHA-256, faz backup dos arquivos atuais e reinicia.")
+                                            : TR("Downloads %.1f MB from GitHub, verifies SHA-256, backs up your current AppImage and restarts.",
+                                                 "Baixa %.1f MB do GitHub, verifica o SHA-256, faz backup do AppImage atual e reinicia."),
+                                        asset_sz / 1e6);
+                        } else {
+                            ImGui::Text("%s", is_win_zip
+                                                  ? TR("Downloads the update ZIP from GitHub, verifies SHA-256, backs up current app files and restarts.",
+                                                       "Baixa o ZIP de atualização do GitHub, verifica o SHA-256, faz backup dos arquivos atuais e reinicia.")
+                                                  : TR("Downloads the new AppImage from GitHub, verifies SHA-256, backs up the current one and restarts.",
+                                                       "Baixa o novo AppImage do GitHub, verifica o SHA-256, faz backup do atual e reinicia."));
+                        }
                         ImGui::TextDisabled("%s", TR("Saves, settings, mods and compiled game data are never modified.",
                                                      "Saves, configurações, mods e dados do jogo nunca são alterados."));
                         ImGui::Spacing();

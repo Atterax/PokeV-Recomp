@@ -19,6 +19,8 @@ enum UpdaterInstallKind {
     UPD_INSTALL_RECOMPLAUNCHER,
     UPD_INSTALL_LINUX_APPIMAGE_RO,
     UPD_INSTALL_LINUX_APPIMAGE,
+    UPD_INSTALL_WINDOWS_ZIP_RO,
+    UPD_INSTALL_WINDOWS_ZIP,
 };
 
 enum UpdaterInstallState {
@@ -42,12 +44,14 @@ struct UpdaterSnapshot {
     bool has_checked = false;
     bool is_prerelease_channel = false;
 
-    // Phase B: Linux AppImage install state
+    // Phase B / C: Platform auto-update install state
     UpdaterInstallKind install_kind = UPD_INSTALL_UNSUPPORTED;
     std::string install_target_path;
     std::string install_reason;
     std::string linux_asset_url;
     uint64_t linux_asset_size = 0;
+    std::string windows_asset_url;
+    uint64_t windows_asset_size = 0;
     std::string sha256sums_url;
 
     UpdaterInstallState install_state = UPD_INST_IDLE;
@@ -55,6 +59,9 @@ struct UpdaterSnapshot {
     uint64_t total_bytes = 0;
     std::string install_error;
     std::string updated_from_tag;  // non-empty when this launch follows a completed update
+    bool recovery_pending = false; // interrupted Windows update needs external --recover before continuing
+    bool recovery_blocked = false; // Play must remain blocked due to pending or failed recovery
+    std::string update_notice;     // non-empty informational notice after automatic recovery
 };
 
 // Pure helpers (also used by unit tests)
@@ -71,6 +78,8 @@ struct UpdaterParseResult {
     std::string body;
     std::string linux_asset_url;
     uint64_t linux_asset_size = 0;
+    std::string windows_asset_url;
+    uint64_t windows_asset_size = 0;
     std::string sha256sums_url;
 };
 
@@ -115,8 +124,11 @@ std::string updater_parse_sha256sums(const std::string &sums_text, const std::st
 // Compute lowercase hex SHA-256 of a file on disk using CacheSha256, or "" on I/O error.
 std::string updater_file_sha256(const std::string &path);
 
-// Detect current installation mode (AppImage writable/read-only, RecompLauncher, or unsupported).
+// Detect current installation mode (AppImage, Windows ZIP, RecompLauncher, or unsupported).
 UpdaterInstallKind updater_detect_install_kind(std::string &out_target_path, std::string &out_reason);
+
+// Validate that an extracted Windows staging folder contains required application files and no user-data collisions.
+bool updater_validate_windows_extracted_dir(const std::string &dir, std::string &out_error);
 
 // Atomic file replacement with backup & rollback (used in tests and recovery).
 bool updater_apply_staged_file(const std::string &target_path, const std::string &staged_path,
@@ -128,10 +140,12 @@ void updater_configure(const char *current_version, const char *data_root,
 bool updater_is_suppressed_by_launcher();
 void updater_start_check(bool manual);
 
-// Phase B: Linux AppImage download, SHA-256 verification, cancel, and external apply+relaunch
+// Phase B / C: Download, SHA-256 verification, cancel, external apply+relaunch & Windows recovery
 void updater_start_install();
 void updater_cancel_install();
 bool updater_launch_external_apply_and_exit_ready();
+bool updater_is_recovery_blocked();
+bool updater_launch_windows_recovery_and_exit_ready();
 
 void updater_shutdown();
 UpdaterSnapshot updater_get_snapshot();
