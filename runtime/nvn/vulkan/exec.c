@@ -4413,6 +4413,16 @@ static void bind_note(int kind, uint64_t addr, uint64_t size) {
 // reader of the table in the draw / dispatch (drv_dedupe, cbuf_info, gmem_direct_pick, gmem_chunk_bind, gfast_prepare,
 // vc_mark_sbufs) takes sbufs(stage); st.sbuf itself keeps the game's bindings (rehashed next frame).
 static void snap_apply_(int stage, uint32_t read_mask);
+// A draw stage's slots to snapshot: those its shader reads the addresses of - none, on a physical-memory window (Scarlet
+// / Violet), when the shader stores to global memory: its stores must reach the game's memory, and a copy took them.
+// The characters' faces: vertex programs (7442131000, 7442131600, ...) write the 48-byte records of storage buffer 13
+// that the expressions are drawn from; written into the ring, the originals never got them and every face kept its
+// neutral pose - eyes open behind closed eyelashes, mouths shut. Compute dispatches already read in place there
+// (snap_storage); the copies stay for the draws that only read (the map's text).
+static uint32_t snap_draw_mask(const ShaderInfo *si) {
+    if (!si) return 0;
+    return si->uses_gmem_store && atomic_load(&gwin_done) && gwin_.phys ? 0 : si->ssbo_read;
+}
 static void snap_apply(int stage, uint32_t read_mask) {
     if (!read_mask) { snap_apply_(stage, 0); return; }  // (per context only)
     // (a shadow worker: the copies' addresses this part had this frame for the same ranges - snap_storage gives every
@@ -8085,8 +8095,8 @@ static void draw_(CmdRec *r, bool indexed) {
             g_mirror_w = (float)st.rt.color[0]->width;
         }
     }
-    snap_apply(0, pr->vi->ssbo_read);  // (overlap) the storage slots the shaders read: a copy where the CPU rewrites the range
-    snap_apply(1, pr->fi->ssbo_read);
+    snap_apply(0, snap_draw_mask(pr->vi));  // (overlap) the storage slots the shaders read: a copy where the CPU rewrites the range
+    snap_apply(1, snap_draw_mask(pr->fi));
     {   // fragment-shader hash: interior backdrop detection (widescreen), skip lists, item twinkle (renderer.m)
         static uint64_t last_fs_t[NCTX], last_hash_t[NCTX];
         uint64_t *lfs = &last_fs_t[sw_ctx()], *lh = &last_hash_t[sw_ctx()];
