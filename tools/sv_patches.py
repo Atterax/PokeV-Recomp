@@ -140,6 +140,20 @@ def _sv_lua_clock_slot(gen, a):
             f'  /* {a:#x}: a script reads a clock slot: the indoor camera\'s steps */')
 
 
+def _sv_timeline_time(gen, a):
+    # 0x7000b83d94: add x0, x20, #0xe0, right after a sequence player's new time (s0: its position + this frame's step,
+    # in 30 fps frames - s8) and before it plays its tracks to it (0x7000b84218). At 60 fps a one-frame clip (a camera
+    # cut: on a Poké Ball throw, a frame of the sum of two cameras, the ground and tall grass near the catch gone)
+    # was played again half a frame on: rt_sv_timeline_time (runtime/hle/framepace.c) plays such a moment as 30 fps
+    # would. LARECOMP_SV_TIMELINE_SNAP=0: as before.
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0x91038280, hex(w)  # add x0, x20, #0xe0
+    return ('{ extern float rt_sv_timeline_time(uint64_t player, float t, float step); float t_, st_; '
+            'memcpy(&t_, &c->v[0], 4); memcpy(&st_, &c->v[8], 4); t_ = rt_sv_timeline_time(c->x[20], t_, st_); '
+            'c->v[0] = 0; memcpy(&c->v[0], &t_, 4); c->x[0] = c->x[20] + 0xe0; }'
+            f'  /* {a:#x}: a sequence player\'s new time: one-frame clips as moments */')
+
+
 def sv_patches(build):
     if build.lower() in SV_BUILDS:
         return {
@@ -154,5 +168,6 @@ def sv_patches(build):
             0x7000cf18a4: _sv_proj_aspect_s4,
             0x7000b46da0: _sv_lua_frame_time,
             0x7000b92780: _sv_lua_clock_slot,
+            0x7000b83d94: _sv_timeline_time,
         }
     return {}
