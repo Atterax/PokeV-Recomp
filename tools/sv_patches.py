@@ -123,6 +123,23 @@ def _sv_lua_frame_time(gen, a):
             f'  /* {a:#x}: lua_pushnumber: the scripts\' frame time */')
 
 
+def _sv_lua_clock_slot(gen, a):
+    # 0x7000b92780: ldr x0, [x0], in the native (0x7000b926f0) that hands a script clock slot w21 (x19: the lua_State;
+    # x0: the slot - its start, its duration at +8). The scripts' fixed-step loop (lines 278989-279004) adds slot 2's
+    # duration to an object's time and counts the 1/30 s steps in it, then calls its update with them; the indoor
+    # camera's update approaches its target by 40 % a step. At 60 fps a step came every other frame: the camera moved
+    # at 30 Hz behind a character moving at 60 (its body shook on screen indoors). rt_sv_lua_clock_slot
+    # (runtime/hle/framepace.c) gives that camera a step every frame, its approach scaled to the frame's time.
+    # LARECOMP_SV_LUA_CAMERA=0: as before.
+    want = {a: 0xf9400000, a + 4: 0xf9400501}  # ldr x0, [x0]; ldr x1, [x8, #8]
+    for at, word in want.items():
+        w = struct.unpack_from('<I', gen.nso.image, at - gen.base)[0]
+        assert w == word, (hex(at), hex(w))
+    return ('{ extern void rt_sv_lua_clock_slot(uint64_t L, uint64_t slot, uint64_t s); '
+            'rt_sv_lua_clock_slot(c->x[19], c->x[21], c->x[0]); c->x[0] = LD64(c->x[0]); }'
+            f'  /* {a:#x}: a script reads a clock slot: the indoor camera\'s steps */')
+
+
 def sv_patches(build):
     if build.lower() in SV_BUILDS:
         return {
@@ -136,5 +153,6 @@ def sv_patches(build):
             0x7000cf182c: _sv_proj_half_fovy,
             0x7000cf18a4: _sv_proj_aspect_s4,
             0x7000b46da0: _sv_lua_frame_time,
+            0x7000b92780: _sv_lua_clock_slot,
         }
     return {}

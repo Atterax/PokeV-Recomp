@@ -11,6 +11,7 @@
 //   LARECOMP_FRAMEPACE=1     hand the timer the vsyncs elapsed (default: the game's own value)
 //   LARECOMP_FRAME_STEPS_MAX maximum steps per frame (default 4: after a long stall the game doesn't jump ahead)
 //   LARECOMP_FORCE_STEPS=<n> (test) always n
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -263,4 +264,78 @@ void rt_sv_lua_frame_time(uint64_t L) {
         LOG("[pace] the scripts' frame time: %.6f s, now %.6f s\n", *(const double *)dt, v);
     }
     memcpy(dt, &v, sizeof v);
+}
+
+// Scarlet / Violet's scripts run some objects in fixed 1/30 s steps (lines 278989-279004): the object's time (its
+// [21]) gets clock slot 2's duration - this frame's time - and its update gets the whole 1/30 s steps in it. The indoor
+// camera's update (lines 279349-279422) approaches its target by f = its [41] (0.4) a step:
+// CD9AE7C27B00EB066.SF667EA15F51B1676, cur += (target - cur) * f, once per step. At 60 fps a step came every other
+// frame: the camera moved at 30 Hz behind a character moving at 60, and indoors the character shook on screen (at 30
+// fps it doesn't). From the native that hands the loop slot 2 (sv_patches.py _sv_lua_clock_slot), before the loop adds
+// it: that camera's time is set for one step now, and f to what this frame's time makes of a 1/30 s step's,
+// 1 - (1 - f)^(dt * 30) - the same approach in time at any frame rate, 30 fps's own at 30. The game's f is kept per
+// camera (taken again when the game sets another). 60 fps only; LARECOMP_SV_LUA_CAMERA=0: as before.
+static uint8_t *lua_index(uint64_t t, long i) {  // (Lua 5.4: t[i], array part, else the hash part)
+    if (i >= 1 && (uint64_t)i <= *(const uint32_t *)(uintptr_t)(t + 0xc))  // (alimit)
+        return (uint8_t *)(uintptr_t)(*(const uint64_t *)(uintptr_t)(t + 0x10) + 16ull * (uint64_t)(i - 1));
+    uint8_t lsizenode = *(const uint8_t *)(uintptr_t)(t + 0xb);
+    uint64_t node = *(const uint64_t *)(uintptr_t)(t + 0x18);
+    for (uint64_t k = 0; k < (1ull << lsizenode); k++) {
+        uint8_t *n = (uint8_t *)(uintptr_t)(node + 24 * k);
+        if (n[9] == 0x03 && *(const int64_t *)(n + 16) == i) return n;  // (an integer key)
+    }
+    return NULL;
+}
+static const uint8_t *lua_method(uint64_t t, const char *name) {  // (t.name, through the metatables' __index tables)
+    for (int depth = 0; t && depth < 8; depth++) {
+        const uint8_t *v = lua_find(t, name);
+        if (v) return v;
+        uint64_t mt = *(const uint64_t *)(uintptr_t)(t + 0x28);
+        const uint8_t *ix = mt ? lua_find(mt, "__index") : NULL;
+        if (!ix || (ix[8] & 0x0f) != 5) return NULL;
+        t = *(const uint64_t *)ix;
+    }
+    return NULL;
+}
+void rt_sv_lua_clock_slot(uint64_t L, uint64_t slot, uint64_t s) {
+    static int on = -1;
+    if (on < 0) {
+        const char *e = ENV("LARECOMP_SV_LUA_CAMERA");
+        on = !e || atoi(e) != 0;
+        LOG("[pace] Scarlet / Violet indoor camera in steps of the frame: %s\n", on ? "on" : "off (LARECOMP_SV_LUA_CAMERA=0)");
+    }
+    if (!on || slot != 2) return;
+    uint64_t ci = *(const uint64_t *)(uintptr_t)(L + 0x20);  // (lua_State: ci - the native's; previous: its Lua caller)
+    uint64_t caller = ci ? *(const uint64_t *)(uintptr_t)(ci + 0x10) : 0;
+    if (!caller) return;
+    const uint8_t *self = (const uint8_t *)(uintptr_t)(*(const uint64_t *)(uintptr_t)caller + 16);  // (its R0)
+    if ((self[8] & 0x0f) != 5) return;
+    uint64_t t = *(const uint64_t *)self;
+    const uint8_t *m = lua_method(t, "FC0150FC2959FFA71");  // (the update the loop calls)
+    if (!m || (m[8] & 0x3f) != 6) return;  // (a Lua closure)
+    uint64_t p = *(const uint64_t *)(uintptr_t)(*(const uint64_t *)m + 0x18);  // (its Proto)
+    if (*(const int *)(uintptr_t)(p + 0x2c) != 279349 || *(const int *)(uintptr_t)(p + 0x18) != 243) return;  // (linedefined, sizecode)
+    uint8_t *acc = lua_index(t, 21), *fv = lua_index(t, 41);
+    if (!acc || !fv || acc[8] != 0x13 || fv[8] != 0x13) return;  // (floats)
+    static struct { uint64_t t; double f30, set; } cams[8];
+    static int ncams;
+    int i = 0;
+    while (i < ncams && cams[i].t != t) i++;
+    if (i == ncams) {
+        if (ncams == 8) i = 0; else ncams++;
+        cams[i].t = t, cams[i].set = -1;
+    }
+    double cur;
+    memcpy(&cur, fv, 8);
+    if (cur != cams[i].set) cams[i].f30 = cur;  // (the game's own: new, or set again)
+    if (!rt_pla_is_60fps()) {  // (30 fps: the game's own again)
+        if (cams[i].set >= 0) memcpy(fv, &cams[i].f30, 8), cams[i].set = -1;
+        return;
+    }
+    double dur = (double)*(const uint64_t *)(uintptr_t)(s + 8) / 1e9;
+    if (!(dur > 0 && dur < 1) || !(cams[i].f30 > 0 && cams[i].f30 < 1)) return;
+    double f = 1.0 - pow(1.0 - cams[i].f30, dur * 30.0), time = 1.0 / 30 - dur + 1e-9;  // (one step: time + dur >= 1/30)
+    cams[i].set = f;
+    memcpy(fv, &f, 8);
+    memcpy(acc, &time, 8);
 }
