@@ -186,6 +186,7 @@ jobs:
               names = set(zf.namelist())
               required = [
                   "PokeV-Recomp/PokeV-Recomp.exe",
+                  "PokeV-Recomp/PokeV-Recomp-updater.exe",
                   "PokeV-Recomp/recomplauncher.json",
                   "PokeV-Recomp/zaimport/zaimport.exe",
                   "PokeV-Recomp/zig/zig.exe",
@@ -495,4 +496,5 @@ jobs:
           name: "PokeV-Recomp ${{ github.ref_name }}"
           body_path: release-body.md
           draft: false
-          prerelease: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          make_latest: ${{ !contains(github.ref_name, '-') }}
