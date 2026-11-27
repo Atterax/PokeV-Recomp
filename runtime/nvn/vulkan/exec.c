@@ -13113,7 +13113,6 @@ static void objmv_capture(Prog *pr, Pipe *pp, uint32_t streams, const VkDescript
         if (nl++ < 5) LOG("[objmv] frame %llu: no room for another draw (2048 made in the last 2 frames, or 8 of one mesh and program)\n", (unsigned long long)f);
         goto out;
     }
-    e->frame[cur] = f;
     for (int i = 0; i < 18; i++) {
         if (!(mask >> i & 1)) continue;
         Range r = st.ubuf[0][i - 3];
@@ -13126,6 +13125,7 @@ static void objmv_capture(Prog *pr, Pipe *pp, uint32_t streams, const VkDescript
         if (len) memcpy(e->data[cur][i], (const void *)(uintptr_t)r.addr, len);
         e->len[cur][i] = len;
     }
+    e->frame[cur] = f;  // (only mark valid once every slot copied; a mid-loop OOM must not expose stale f-2 slots)
     mo.captured++;
     bool have_prev = e->frame[prv] + 1 == f && e->size == v0.size && mo.prev_frame + 1 == f && mo.prev_moves == xm_moves;
     e->size = v0.size, e->mask = mask;
