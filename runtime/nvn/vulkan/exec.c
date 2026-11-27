@@ -4420,6 +4420,7 @@ static void snap_apply_(int stage, uint32_t read_mask);
 // neutral pose - eyes open behind closed eyelashes, mouths shut. Compute dispatches already read in place there
 // (snap_storage); the copies stay for the draws that only read (the map's text).
 static uint32_t snap_draw_mask(const ShaderInfo *si) {
+    if (!si) return 0;
     return si->uses_gmem_store && atomic_load(&gwin_done) && gwin_.phys ? 0 : si->ssbo_read;
 }
 static void snap_apply(int stage, uint32_t read_mask) {
