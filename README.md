@@ -24,8 +24,7 @@
 > [reporting bugs and crashes](../../issues) (with your `logs/play.log` file when you can): every report helps
 > improve the project.
 >
-> **Development will be slower for a while**, as my main focus right now is
-> [PokeL-ARecomp](https://github.com/fabioschmidt01/PokeL-ARecomp).
+> I inhered this project from > [fabioschmidt01](https://github.com/fabioschmidt01), since he was going to focus on Legends Arceus. Big thanks @fabioschmidt01, has been a nice project.
 
 > [!NOTE]
 > **Latest updates (v0.0.23 to v0.1.0): big improvements in performance and stability, and many bug fixes.**
